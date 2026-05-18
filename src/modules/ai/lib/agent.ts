@@ -10,10 +10,13 @@ import {
   DEFAULT_MODEL_ID,
   getModel,
   getModelContextLimit,
+  isCustomModelId,
   LMSTUDIO_DEFAULT_BASE_URL,
   MAX_AGENT_STEPS,
+  OLLAMA_DEFAULT_BASE_URL,
   providerNeedsKey,
   selectSystemPrompt,
+  type CustomModel,
   type ModelId,
   type ProviderId,
 } from "../config";
@@ -60,6 +63,7 @@ function ellipsize(s: string, max: number): string {
 export type BuildModelOptions = {
   modelIdOverride?: string;
   lmstudioBaseURL?: string;
+  ollamaBaseURL?: string;
   openaiCompatibleBaseURL?: string;
 };
 
@@ -78,8 +82,9 @@ export async function buildLanguageModel(
   }
   const key = keys[provider] ?? "";
   const lmstudioURL = options.lmstudioBaseURL ?? LMSTUDIO_DEFAULT_BASE_URL;
+  const ollamaURL = options.ollamaBaseURL ?? OLLAMA_DEFAULT_BASE_URL;
   const compatURL = options.openaiCompatibleBaseURL ?? "";
-  const cacheKey = `${provider} ${key} ${resolvedModelId} ${lmstudioURL} ${compatURL}`;
+  const cacheKey = `${provider} ${key} ${resolvedModelId} ${lmstudioURL} ${ollamaURL} ${compatURL}`;
   const hit = modelCache.get(cacheKey);
   if (hit) return hit;
 
@@ -165,6 +170,19 @@ export async function buildLanguageModel(
       })(resolvedModelId);
       break;
     }
+    case "ollama": {
+      const { createOpenAICompatible } =
+        await import("@ai-sdk/openai-compatible");
+      built = createOpenAICompatible({
+        name: "ollama",
+        baseURL: ollamaURL,
+        // Ollama's OpenAI-compatible endpoint ignores the key but the SDK
+        // still sends an Authorization header; a placeholder keeps it happy.
+        apiKey: "ollama",
+        fetch: localProxyFetch,
+      })(resolvedModelId);
+      break;
+    }
     default: {
       const _exhaustive: never = provider;
       throw new Error(`Unsupported provider: ${_exhaustive as ProviderId}`);
@@ -174,15 +192,53 @@ export async function buildLanguageModel(
   return built;
 }
 
+export type ConfiguredModelDeps = {
+  lmstudioBaseURL?: string;
+  lmstudioModelId?: string;
+  ollamaBaseURL?: string;
+  ollamaModelId?: string;
+  openaiCompatibleBaseURL?: string;
+  openaiCompatibleModelId?: string;
+  /** User-registered custom models, looked up when modelId is `custom:*`. */
+  customModels?: readonly CustomModel[];
+};
+
 export function buildConfiguredLanguageModel(
-  modelId: ModelId,
+  modelId: ModelId | string,
   keys: ProviderKeys,
-  lmstudioBaseURL?: string,
-  lmstudioModelId?: string,
-  openaiCompatibleBaseURL?: string,
-  openaiCompatibleModelId?: string,
+  deps: ConfiguredModelDeps = {},
 ): Promise<LanguageModel> {
-  const m = getModel(modelId);
+  const {
+    lmstudioBaseURL,
+    lmstudioModelId,
+    ollamaBaseURL,
+    ollamaModelId,
+    openaiCompatibleBaseURL,
+    openaiCompatibleModelId,
+    customModels,
+  } = deps;
+
+  // User-registered custom model: resolve provider + remote id from the list.
+  if (isCustomModelId(modelId)) {
+    const c = customModels?.find((x) => x.id === modelId);
+    if (!c) {
+      throw new Error(
+        `Custom model "${modelId}" is not registered. Open Settings → Models → Custom models.`,
+      );
+    }
+    if (!c.remoteModelId.trim()) {
+      throw new Error(
+        `Custom model "${c.label}" has no remote model id. Open Settings → Models.`,
+      );
+    }
+    return buildLanguageModel(c.provider, keys, c.remoteModelId.trim(), {
+      lmstudioBaseURL,
+      ollamaBaseURL,
+      openaiCompatibleBaseURL,
+    });
+  }
+
+  const m = getModel(modelId as ModelId);
   let resolvedId: string = m.id;
   if (m.id === "lmstudio-local") {
     if (!lmstudioModelId?.trim()) {
@@ -191,6 +247,13 @@ export function buildConfiguredLanguageModel(
       );
     }
     resolvedId = lmstudioModelId.trim();
+  } else if (m.id === "ollama-local") {
+    if (!ollamaModelId?.trim()) {
+      throw new Error(
+        "Ollama: no model id set. Run `ollama serve`, pull a model (e.g. `ollama pull gemma3`), then set its id in Settings → Models.",
+      );
+    }
+    resolvedId = ollamaModelId.trim();
   } else if (m.id === "openai-compatible-custom") {
     if (!openaiCompatibleModelId?.trim()) {
       throw new Error(
@@ -201,6 +264,7 @@ export function buildConfiguredLanguageModel(
   }
   return buildLanguageModel(m.provider, keys, resolvedId, {
     lmstudioBaseURL,
+    ollamaBaseURL,
     openaiCompatibleBaseURL,
   });
 }
@@ -209,12 +273,12 @@ const PLAN_MODE_PROMPT = `## PLAN MODE — ACTIVE
 Mutating tools (write_file, edit, multi_edit, create_directory) will queue their changes for the user to review as a single diff. Do NOT execute bash_run or bash_background while plan mode is active — restrict yourself to reads (read_file, grep, glob, list_directory) and the queued mutations. After queueing the full set of edits, stop and return a brief summary; do not continue acting until the user has accepted/rejected.`;
 
 function buildStableSystem(
-  modelId: ModelId,
+  baseModelId: string,
   persona: { name: string; instructions: string } | null,
   customInstructions: string | undefined,
   projectMemory: string | null,
 ): string {
-  const base = selectSystemPrompt(getModel(modelId).id);
+  const base = selectSystemPrompt(baseModelId);
   const personaBlock = persona?.instructions.trim()
     ? `\n\n## ACTIVE AGENT — ${persona.name}\n${persona.instructions.trim()}`
     : "";
@@ -267,9 +331,34 @@ const EMPTY_USAGE: AgentUsage = {
   cachedInputTokens: 0,
 };
 
+/** Resolve provider + context limit for any model id, including
+ *  user-registered `custom:*` ids that aren't in the static MODELS table. */
+function resolveModelMeta(
+  modelId: ModelId | string,
+  customModels: readonly CustomModel[] | undefined,
+): { provider: ProviderId; contextLimit: number; baseId: string } {
+  if (isCustomModelId(modelId)) {
+    const c = customModels?.find((x) => x.id === modelId);
+    if (c) {
+      return {
+        provider: c.provider,
+        contextLimit: c.contextLimit ?? 32_000,
+        baseId: c.remoteModelId,
+      };
+    }
+    return { provider: "ollama", contextLimit: 32_000, baseId: modelId };
+  }
+  const m = getModel(modelId as ModelId);
+  return {
+    provider: m.provider,
+    contextLimit: getModelContextLimit(m.id),
+    baseId: m.id,
+  };
+}
+
 export type RunAgentOptions = {
   keys: ProviderKeys;
-  modelId?: ModelId;
+  modelId?: ModelId | string;
   customInstructions?: string;
   agentPersona?: { name: string; instructions: string } | null;
   toolContext: ToolContext;
@@ -279,8 +368,11 @@ export type RunAgentOptions = {
   onFinishMeta?: (info: { hitStepCap: boolean; finishReason: string }) => void;
   lmstudioBaseURL?: string;
   lmstudioModelId?: string;
+  ollamaBaseURL?: string;
+  ollamaModelId?: string;
   openaiCompatibleBaseURL?: string;
   openaiCompatibleModelId?: string;
+  customModels?: readonly CustomModel[];
   planMode?: boolean;
   projectMemory?: string | null;
   uiMessages: UIMessage[];
@@ -289,18 +381,20 @@ export type RunAgentOptions = {
 
 export async function runAgentStream(opts: RunAgentOptions) {
   const modelId = opts.modelId ?? DEFAULT_MODEL_ID;
-  const model = await buildConfiguredLanguageModel(
-    modelId,
-    opts.keys,
-    opts.lmstudioBaseURL,
-    opts.lmstudioModelId,
-    opts.openaiCompatibleBaseURL,
-    opts.openaiCompatibleModelId,
-  );
-  const provider = getModel(modelId).provider;
+  const model = await buildConfiguredLanguageModel(modelId, opts.keys, {
+    lmstudioBaseURL: opts.lmstudioBaseURL,
+    lmstudioModelId: opts.lmstudioModelId,
+    ollamaBaseURL: opts.ollamaBaseURL,
+    ollamaModelId: opts.ollamaModelId,
+    openaiCompatibleBaseURL: opts.openaiCompatibleBaseURL,
+    openaiCompatibleModelId: opts.openaiCompatibleModelId,
+    customModels: opts.customModels,
+  });
+  const meta = resolveModelMeta(modelId, opts.customModels);
+  const provider = meta.provider;
 
   const stableSystem = buildStableSystem(
-    modelId,
+    meta.baseId,
     opts.agentPersona ?? null,
     opts.customInstructions,
     opts.projectMemory ?? null,
@@ -309,7 +403,7 @@ export async function runAgentStream(opts: RunAgentOptions) {
   const history = await convertToModelMessages(opts.uiMessages);
   const compact = compactModelMessagesDetailed(
     history,
-    getModelContextLimit(getModel(modelId).id),
+    meta.contextLimit,
   );
   const compactedHistory = compact.messages;
   if (compact.compacted) {

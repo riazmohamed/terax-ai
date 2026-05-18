@@ -1,6 +1,6 @@
 import { generateText, stepCountIs } from "ai";
-import { DEFAULT_MODEL_ID, getModel, type ModelId } from "../config";
-import { buildLanguageModel } from "../lib/agent";
+import { DEFAULT_MODEL_ID, type CustomModel, type ModelId } from "../config";
+import { buildConfiguredLanguageModel } from "../lib/agent";
 import type { ProviderKeys } from "../lib/keyring";
 import type { ToolContext } from "../tools/context";
 import { buildFsTools } from "../tools/fs";
@@ -13,9 +13,15 @@ type Args = {
   type: SubagentType;
   prompt: string;
   keys: ProviderKeys;
-  modelId: ModelId;
+  modelId: ModelId | string;
   toolContext: ToolContext;
   lmstudioBaseURL?: string;
+  lmstudioModelId?: string;
+  ollamaBaseURL?: string;
+  ollamaModelId?: string;
+  openaiCompatibleBaseURL?: string;
+  openaiCompatibleModelId?: string;
+  customModels?: readonly CustomModel[];
   onStep?: (label: string) => void;
 };
 
@@ -32,6 +38,12 @@ export async function runSubagent({
   modelId,
   toolContext,
   lmstudioBaseURL,
+  lmstudioModelId,
+  ollamaBaseURL,
+  ollamaModelId,
+  openaiCompatibleBaseURL,
+  openaiCompatibleModelId,
+  customModels,
   onStep,
 }: Args): Promise<RunResult> {
   const def = SUBAGENTS[type];
@@ -46,12 +58,15 @@ export async function runSubagent({
     if (t in readOnly) tools[t] = readOnly[t];
   }
 
-  const model = await buildLanguageModel(
-    getModel(modelId).provider,
-    keys,
-    getModel(modelId).id,
-    { lmstudioBaseURL },
-  );
+  const model = await buildConfiguredLanguageModel(modelId, keys, {
+    lmstudioBaseURL,
+    lmstudioModelId,
+    ollamaBaseURL,
+    ollamaModelId,
+    openaiCompatibleBaseURL,
+    openaiCompatibleModelId,
+    customModels,
+  });
 
   const start = Date.now();
   const result = await generateText({

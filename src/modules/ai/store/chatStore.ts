@@ -6,8 +6,8 @@ import {
 import { create } from "zustand";
 import {
   DEFAULT_MODEL_ID,
-  getModel,
   providerNeedsKey,
+  resolveModel,
   type ModelId,
   type ProviderId,
 } from "../config";
@@ -112,8 +112,8 @@ type StoreState = {
   setApiKeys: (keys: ProviderKeys) => void;
   setApiKey: (provider: ProviderId, key: string | null) => void;
 
-  selectedModelId: ModelId;
-  setSelectedModelId: (id: ModelId) => void;
+  selectedModelId: ModelId | string;
+  setSelectedModelId: (id: ModelId | string) => void;
 
   mini: MiniState;
   openMini: () => void;
@@ -247,10 +247,13 @@ function makeChat(sessionId: string): Chat<UIMessage> {
     getPlanMode: () => usePlanStore.getState().active,
     getLmstudioBaseURL: () => usePreferencesStore.getState().lmstudioBaseURL,
     getLmstudioModelId: () => usePreferencesStore.getState().lmstudioModelId,
+    getOllamaBaseURL: () => usePreferencesStore.getState().ollamaBaseURL,
+    getOllamaModelId: () => usePreferencesStore.getState().ollamaModelId,
     getOpenaiCompatibleBaseURL: () =>
       usePreferencesStore.getState().openaiCompatibleBaseURL,
     getOpenaiCompatibleModelId: () =>
       usePreferencesStore.getState().openaiCompatibleModelId,
+    getCustomModels: () => usePreferencesStore.getState().customModels,
     onStep: (step) => {
       useChatStore.getState().patchAgentMeta({ step });
     },
@@ -511,13 +514,17 @@ export function getAgentMeta(): AgentMeta {
 
 export function getActiveProviderKey(): string | null {
   const { selectedModelId, apiKeys } = useChatStore.getState();
-  return apiKeys[getModel(selectedModelId).provider] ?? null;
+  const custom = usePreferencesStore.getState().customModels;
+  const m = resolveModel(selectedModelId, custom);
+  return m ? (apiKeys[m.provider] ?? null) : null;
 }
 
-export function hasKeyForModel(modelId: ModelId): boolean {
+export function hasKeyForModel(modelId: ModelId | string): boolean {
   const { apiKeys } = useChatStore.getState();
-  const provider = getModel(modelId).provider;
-  return providerNeedsKey(provider) ? !!apiKeys[provider] : true;
+  const custom = usePreferencesStore.getState().customModels;
+  const m = resolveModel(modelId, custom);
+  if (!m) return false;
+  return providerNeedsKey(m.provider) ? !!apiKeys[m.provider] : true;
 }
 
 export function getOrCreateChat(sessionId: string): Chat<UIMessage> {
@@ -541,7 +548,16 @@ export async function sendMessage(text: string): Promise<boolean> {
   const state = useChatStore.getState();
   const sessionId = state.activeSessionId;
   if (!sessionId) return false;
-  if (providerNeedsKey(getModel(state.selectedModelId).provider) && !getActiveProviderKey()) return false;
+  const selModel = resolveModel(
+    state.selectedModelId,
+    usePreferencesStore.getState().customModels,
+  );
+  if (
+    selModel &&
+    providerNeedsKey(selModel.provider) &&
+    !getActiveProviderKey()
+  )
+    return false;
   const c = getOrCreateChat(sessionId);
   await c.sendMessage({ text });
   return true;

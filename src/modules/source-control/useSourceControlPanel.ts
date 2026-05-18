@@ -6,7 +6,7 @@ import {
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
 import { useChatStore } from "@/modules/ai/store/chatStore";
-import { getModel, providerNeedsKey } from "@/modules/ai/config";
+import { providerNeedsKey, resolveModel } from "@/modules/ai/config";
 import {
   invalidateDiff,
   invalidateRepoDiffs,
@@ -347,8 +347,10 @@ export function useSourceControlPanel(
 ): SourceControlPanelState {
   const selectedModelId = useChatStore((state) => state.selectedModelId);
   const agentStatus = useChatStore((state) => state.agentMeta.status);
+  const customModels = usePreferencesStore((state) => state.customModels);
   const hasApiKeyForSelected = useChatStore((state) => {
-    const model = getModel(state.selectedModelId);
+    const model = resolveModel(state.selectedModelId, customModels);
+    if (!model) return false;
     return !providerNeedsKey(model.provider) || !!state.apiKeys[model.provider];
   });
   const lmstudioModelId = usePreferencesStore((state) => state.lmstudioModelId);
@@ -398,7 +400,7 @@ export function useSourceControlPanel(
 
   const allClean = stagedEntries.length === 0 && unstagedEntries.length === 0;
   const canPush = !!status?.upstream && status.behind === 0;
-  const selectedModel = getModel(selectedModelId);
+  const selectedModel = resolveModel(selectedModelId, customModels);
   const aiBusy = agentStatus !== "idle" && agentStatus !== "error";
   const anyActionBusy = localActionBusy !== null || summary.busyAction !== null;
   const aiUnavailableReason = useMemo(() => {
@@ -408,11 +410,11 @@ export function useSourceControlPanel(
     if (!hasApiKeyForSelected) {
       return "Connect an AI provider to generate commit messages";
     }
-    if (selectedModel.id === "lmstudio-local" && !lmstudioModelId.trim()) {
+    if (selectedModel?.id === "lmstudio-local" && !lmstudioModelId.trim()) {
       return "Connect an AI provider to generate commit messages";
     }
     if (
-      selectedModel.id === "openai-compatible-custom" &&
+      selectedModel?.id === "openai-compatible-custom" &&
       (!openaiCompatibleBaseURL.trim() || !openaiCompatibleModelId.trim())
     ) {
       return "Connect an AI provider to generate commit messages";
@@ -727,10 +729,15 @@ export function useSourceControlPanel(
       const model = await buildConfiguredLanguageModel(
         selectedModelId,
         chatState.apiKeys,
-        prefs.lmstudioBaseURL,
-        lmstudioModelId,
-        openaiCompatibleBaseURL,
-        openaiCompatibleModelId,
+        {
+          lmstudioBaseURL: prefs.lmstudioBaseURL,
+          lmstudioModelId,
+          ollamaBaseURL: prefs.ollamaBaseURL,
+          ollamaModelId: prefs.ollamaModelId,
+          openaiCompatibleBaseURL,
+          openaiCompatibleModelId,
+          customModels: prefs.customModels,
+        },
       );
       const result = await generateText({
         model,

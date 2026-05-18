@@ -1,5 +1,5 @@
 import type { UIMessage } from "@ai-sdk/react";
-import { type ModelId } from "../config";
+import { type CustomModel, type ModelId } from "../config";
 import { runAgentStream, type AgentUsageDelta } from "./agent";
 import type { ProviderKeys } from "./keyring";
 import { native } from "./native";
@@ -42,14 +42,17 @@ type LiveSnapshot = {
 type Deps = {
   getKeys: () => ProviderKeys;
   toolContext: ToolContext;
-  getModelId: () => ModelId;
+  getModelId: () => ModelId | string;
   getCustomInstructions: () => string;
   getAgentPersona: () => { name: string; instructions: string } | null;
   getLive: () => LiveSnapshot;
   getLmstudioBaseURL?: () => string | undefined;
   getLmstudioModelId?: () => string | undefined;
+  getOllamaBaseURL?: () => string | undefined;
+  getOllamaModelId?: () => string | undefined;
   getOpenaiCompatibleBaseURL?: () => string | undefined;
   getOpenaiCompatibleModelId?: () => string | undefined;
+  getCustomModels?: () => readonly CustomModel[];
   onStep?: (step: string | null) => void;
   onUsage?: (delta: AgentUsageDelta) => void;
   onCompact?: (info: { droppedCount: number }) => void;
@@ -83,8 +86,11 @@ export function createContextAwareTransport(deps: Deps) {
       onFinishMeta: deps.onFinishMeta,
       lmstudioBaseURL: deps.getLmstudioBaseURL?.(),
       lmstudioModelId: deps.getLmstudioModelId?.(),
+      ollamaBaseURL: deps.getOllamaBaseURL?.(),
+      ollamaModelId: deps.getOllamaModelId?.(),
       openaiCompatibleBaseURL: deps.getOpenaiCompatibleBaseURL?.(),
       openaiCompatibleModelId: deps.getOpenaiCompatibleModelId?.(),
+      customModels: deps.getCustomModels?.(),
       planMode: deps.getPlanMode?.(),
       projectMemory,
       uiMessages: messagesForRun,

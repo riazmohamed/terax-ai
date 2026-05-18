@@ -10,6 +10,7 @@ import {
   DeepseekIcon,
   GlobeIcon,
   PlugIcon,
+  ServerStack03Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -24,6 +25,7 @@ const ICON_BY_PROVIDER = {
   openrouter: GlobeIcon,
   "openai-compatible": PlugIcon,
   lmstudio: ComputerIcon,
+  ollama: ServerStack03Icon,
 } as const satisfies Record<ProviderId, typeof ChatGptIcon>;
 
 type Props = {

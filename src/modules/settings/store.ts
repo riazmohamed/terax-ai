@@ -2,8 +2,10 @@ import {
   DEFAULT_AUTOCOMPLETE_MODEL,
   DEFAULT_MODEL_ID,
   LMSTUDIO_DEFAULT_BASE_URL,
+  OLLAMA_DEFAULT_BASE_URL,
   OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
   type AutocompleteProviderId,
+  type CustomModel,
   type ModelId,
 } from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
@@ -50,8 +52,11 @@ export type Preferences = {
   autocompleteModelId: string;
   lmstudioBaseURL: string;
   lmstudioModelId: string;
+  ollamaBaseURL: string;
+  ollamaModelId: string;
   openaiCompatibleBaseURL: string;
   openaiCompatibleModelId: string;
+  customModels: CustomModel[];
   favoriteModelIds: string[];
   recentModelIds: string[];
   vimMode: boolean;
@@ -76,8 +81,11 @@ const KEY_AUTOCOMPLETE_PROVIDER = "autocompleteProvider";
 const KEY_AUTOCOMPLETE_MODEL = "autocompleteModelId";
 const KEY_LMSTUDIO_BASE_URL = "lmstudioBaseURL";
 const KEY_LMSTUDIO_MODEL_ID = "lmstudioModelId";
+const KEY_OLLAMA_BASE_URL = "ollamaBaseURL";
+const KEY_OLLAMA_MODEL_ID = "ollamaModelId";
 const KEY_OPENAI_COMPAT_BASE_URL = "openaiCompatibleBaseURL";
 const KEY_OPENAI_COMPAT_MODEL_ID = "openaiCompatibleModelId";
+const KEY_CUSTOM_MODELS = "customModels";
 const KEY_FAVORITE_MODELS = "favoriteModelIds";
 const KEY_RECENT_MODELS = "recentModelIds";
 const KEY_VIM_MODE = "vimMode";
@@ -117,8 +125,11 @@ export const DEFAULT_PREFERENCES: Preferences = {
   autocompleteModelId: DEFAULT_AUTOCOMPLETE_MODEL.cerebras ?? "",
   lmstudioBaseURL: LMSTUDIO_DEFAULT_BASE_URL,
   lmstudioModelId: "",
+  ollamaBaseURL: OLLAMA_DEFAULT_BASE_URL,
+  ollamaModelId: "",
   openaiCompatibleBaseURL: OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
   openaiCompatibleModelId: "",
+  customModels: [],
   favoriteModelIds: [],
   recentModelIds: [],
   vimMode: false,
@@ -180,9 +191,16 @@ export async function loadPreferences(): Promise<Preferences> {
     openaiCompatibleBaseURL:
       get<string>(KEY_OPENAI_COMPAT_BASE_URL) ??
       DEFAULT_PREFERENCES.openaiCompatibleBaseURL,
+    ollamaBaseURL:
+      get<string>(KEY_OLLAMA_BASE_URL) ?? DEFAULT_PREFERENCES.ollamaBaseURL,
+    ollamaModelId:
+      get<string>(KEY_OLLAMA_MODEL_ID) ?? DEFAULT_PREFERENCES.ollamaModelId,
     openaiCompatibleModelId:
       get<string>(KEY_OPENAI_COMPAT_MODEL_ID) ??
       DEFAULT_PREFERENCES.openaiCompatibleModelId,
+    customModels:
+      get<CustomModel[]>(KEY_CUSTOM_MODELS) ??
+      DEFAULT_PREFERENCES.customModels,
     favoriteModelIds:
       get<string[]>(KEY_FAVORITE_MODELS) ??
       DEFAULT_PREFERENCES.favoriteModelIds,
@@ -257,6 +275,18 @@ export async function setLmstudioBaseURL(value: string): Promise<void> {
 
 export async function setLmstudioModelId(value: string): Promise<void> {
   await writePref(KEY_LMSTUDIO_MODEL_ID, value);
+}
+
+export async function setOllamaBaseURL(value: string): Promise<void> {
+  await writePref(KEY_OLLAMA_BASE_URL, value);
+}
+
+export async function setOllamaModelId(value: string): Promise<void> {
+  await writePref(KEY_OLLAMA_MODEL_ID, value);
+}
+
+export async function setCustomModels(value: CustomModel[]): Promise<void> {
+  await writePref(KEY_CUSTOM_MODELS, value);
 }
 
 export async function setOpenaiCompatibleBaseURL(value: string): Promise<void> {
@@ -347,8 +377,11 @@ export async function onPreferencesChange(
     [KEY_AUTOCOMPLETE_MODEL]: "autocompleteModelId",
     [KEY_LMSTUDIO_BASE_URL]: "lmstudioBaseURL",
     [KEY_LMSTUDIO_MODEL_ID]: "lmstudioModelId",
+    [KEY_OLLAMA_BASE_URL]: "ollamaBaseURL",
+    [KEY_OLLAMA_MODEL_ID]: "ollamaModelId",
     [KEY_OPENAI_COMPAT_BASE_URL]: "openaiCompatibleBaseURL",
     [KEY_OPENAI_COMPAT_MODEL_ID]: "openaiCompatibleModelId",
+    [KEY_CUSTOM_MODELS]: "customModels",
     [KEY_FAVORITE_MODELS]: "favoriteModelIds",
     [KEY_RECENT_MODELS]: "recentModelIds",
     [KEY_VIM_MODE]: "vimMode",

@@ -32,6 +32,7 @@ import {
   Mic01Icon,
   PlugIcon,
   Search01Icon,
+  ServerStack03Icon,
   Settings01Icon,
   StarIcon,
   StopCircleIcon,
@@ -41,12 +42,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { motion } from "motion/react";
 import { useMemo, useRef, useState } from "react";
 import {
+  customModelToInfo,
   getModel,
   MODELS,
   providerNeedsKey,
   PROVIDERS,
   type ModelCapabilities,
-  type ModelId,
   type ModelInfo,
   type ProviderId,
 } from "../config";
@@ -66,6 +67,7 @@ const PROVIDER_ICON = {
   openrouter: GlobeIcon,
   "openai-compatible": PlugIcon,
   lmstudio: ComputerIcon,
+  ollama: ServerStack03Icon,
 } as const satisfies Record<ProviderId, typeof ChatGptIcon>;
 
 export function AiOpenButton({ onOpen }: { onOpen: () => void }) {
@@ -206,7 +208,17 @@ function ModelDropdown() {
   const setSelected = useChatStore((s) => s.setSelectedModelId);
   const favoriteIds = usePreferencesStore((s) => s.favoriteModelIds);
   const recentIds = usePreferencesStore((s) => s.recentModelIds);
-  const current = getModel(selected);
+  const customModels = usePreferencesStore((s) => s.customModels);
+  const customInfos = useMemo(
+    () => customModels.map(customModelToInfo),
+    [customModels],
+  );
+  const allModels = useMemo(
+    () => [...MODELS, ...customInfos] as readonly ModelInfo[],
+    [customInfos],
+  );
+  const current =
+    allModels.find((x) => x.id === selected) ?? getModel("gpt-5.4-mini");
   const [search, setSearch] = useState("");
   const [activeProvider, setActiveProvider] = useState<ProviderId | null>(null);
   const [tab, setTab] = useState<Tab>("all");
@@ -230,7 +242,7 @@ function ModelDropdown() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    let pool: readonly ModelInfo[] = MODELS;
+    let pool: readonly ModelInfo[] = allModels;
     if (tab === "favorites") {
       pool = pool.filter((m) => favoriteIds.includes(m.id));
     } else if (tab === "recent") {
@@ -254,7 +266,7 @@ function ModelDropdown() {
       );
     }
     return pool;
-  }, [activeProvider, favoriteIds, recentIds, search, tab]);
+  }, [activeProvider, favoriteIds, recentIds, search, tab, allModels]);
 
   return (
     <DropdownMenu>
@@ -391,7 +403,7 @@ function ModelDropdown() {
                       void openSettingsWindow("models");
                       return;
                     }
-                    setSelected(m.id as ModelId);
+                    setSelected(m.id);
                   }}
                   onToggleFavorite={() => void toggleFavoriteModel(m.id)}
                 />

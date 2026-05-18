@@ -368,6 +368,9 @@ export default function App() {
   const respondToApproval = useChatStore((s) => s.respondToApproval);
   const lmstudioModelId = usePreferencesStore((s) => s.lmstudioModelId);
   const lmstudioBaseURL = usePreferencesStore((s) => s.lmstudioBaseURL);
+  const ollamaModelId = usePreferencesStore((s) => s.ollamaModelId);
+  const ollamaBaseURL = usePreferencesStore((s) => s.ollamaBaseURL);
+  const customModels = usePreferencesStore((s) => s.customModels);
   const openaiCompatibleModelId = usePreferencesStore(
     (s) => s.openaiCompatibleModelId,
   );
@@ -376,6 +379,8 @@ export default function App() {
   );
   const hasLocalModel =
     (lmstudioBaseURL.trim().length > 0 && lmstudioModelId.trim().length > 0) ||
+    (ollamaBaseURL.trim().length > 0 && ollamaModelId.trim().length > 0) ||
+    customModels.length > 0 ||
     (openaiCompatibleBaseURL.trim().length > 0 &&
       openaiCompatibleModelId.trim().length > 0);
   const hasComposer = hasAnyKey(apiKeys) || hasLocalModel;

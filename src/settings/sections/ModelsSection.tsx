@@ -11,11 +11,14 @@ import { cn } from "@/lib/utils";
 import {
   MODELS,
   PROVIDERS,
+  customModelToInfo,
   getAutocompleteEligibleModels,
   getModel,
   getProvider,
+  makeCustomModelId,
   providerNeedsKey,
   providerSupportsKey,
+  type CustomModel,
   type ModelId,
   type ProviderId,
 } from "@/modules/ai/config";
@@ -26,9 +29,12 @@ import {
   setAutocompleteEnabled,
   setAutocompleteModelId,
   setAutocompleteProvider,
+  setCustomModels,
   setDefaultModel,
   setLmstudioBaseURL,
   setLmstudioModelId,
+  setOllamaBaseURL,
+  setOllamaModelId,
   setOpenaiCompatibleBaseURL,
   setOpenaiCompatibleModelId,
 } from "@/modules/settings/store";
@@ -37,6 +43,9 @@ import {
   ArrowDown01Icon,
   CheckmarkCircle02Icon,
   Cancel01Icon,
+  Add01Icon,
+  Delete02Icon,
+  RefreshIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
@@ -49,6 +58,7 @@ type KeysMap = Record<ProviderId, string | null>;
 export function ModelsSection() {
   const [keys, setKeys] = useState<KeysMap | null>(null);
   const defaultModel = usePreferencesStore((s) => s.defaultModelId);
+  const customModels = usePreferencesStore((s) => s.customModels);
   const lmstudioModelId = usePreferencesStore((s) => s.lmstudioModelId);
   const openaiCompatModelId = usePreferencesStore(
     (s) => s.openaiCompatibleModelId,
@@ -90,6 +100,7 @@ export function ModelsSection() {
       <DefaultModelBlock
         defaultModel={defaultModel}
         keys={keys}
+        customModels={customModels}
         lmstudioModelId={lmstudioModelId}
         openaiCompatModelId={openaiCompatModelId}
       />
@@ -116,6 +127,10 @@ export function ModelsSection() {
 
       <LocalModelsBlock />
 
+      <OllamaBlock />
+
+      <CustomModelsBlock />
+
       <OpenAICompatibleBlock
         compatKey={keys["openai-compatible"]}
         onSaveKey={(v) => onSave("openai-compatible", v)}
@@ -130,18 +145,30 @@ export function ModelsSection() {
 function DefaultModelBlock({
   defaultModel,
   keys,
+  customModels,
   lmstudioModelId,
   openaiCompatModelId,
 }: {
-  defaultModel: ModelId;
+  defaultModel: ModelId | string;
   keys: KeysMap;
+  customModels: CustomModel[];
   lmstudioModelId: string;
   openaiCompatModelId: string;
 }) {
-  const m = getModel(defaultModel);
+  const customInfos = customModels.map(customModelToInfo);
+  const m =
+    customInfos.find((c) => c.id === defaultModel) ??
+    MODELS.find((x) => x.id === defaultModel) ??
+    getModel("gpt-5.4-mini");
 
   const isAvailable = (modelId: string, providerId: ProviderId): boolean => {
+    if (modelId.startsWith("custom:")) {
+      const c = customModels.find((x) => x.id === modelId);
+      return !!c?.remoteModelId.trim();
+    }
     if (modelId === "lmstudio-local") return !!lmstudioModelId.trim();
+    if (modelId === "ollama-local")
+      return !!usePreferencesStore.getState().ollamaModelId.trim();
     if (modelId === "openai-compatible-custom")
       return !!openaiCompatModelId.trim();
     return providerNeedsKey(providerId) ? !!keys[providerId] : true;
@@ -178,7 +205,10 @@ function DefaultModelBlock({
         >
           <div className="max-h-[240px] overflow-y-auto overscroll-contain pr-1">
             {PROVIDERS.map((p) => {
-              const models = MODELS.filter((x) => x.provider === p.id);
+              const models = [
+                ...MODELS.filter((x) => x.provider === p.id),
+                ...customInfos.filter((x) => x.provider === p.id),
+              ];
               if (models.length === 0) return null;
               const hasKey = providerNeedsKey(p.id) ? !!keys[p.id] : true;
               return (
@@ -325,6 +355,324 @@ function LocalModelsBlock() {
             on the server's <span className="font-mono">/v1/models</span> page.
           </p>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function OllamaBlock() {
+  const baseURL = usePreferencesStore((s) => s.ollamaBaseURL);
+  const modelId = usePreferencesStore((s) => s.ollamaModelId);
+  const [urlDraft, setUrlDraft] = useState(baseURL);
+  const [modelDraft, setModelDraft] = useState(modelId);
+  const [testStatus, setTestStatus] = useState<
+    "idle" | "testing" | "ok" | "fail"
+  >("idle");
+  const [tags, setTags] = useState<string[]>([]);
+  const [loadingTags, setLoadingTags] = useState(false);
+
+  useEffect(() => setUrlDraft(baseURL), [baseURL]);
+  useEffect(() => setModelDraft(modelId), [modelId]);
+
+  const dirty = urlDraft.trim() !== baseURL || modelDraft.trim() !== modelId;
+
+  const save = async () => {
+    const u = urlDraft.trim();
+    const m = modelDraft.trim();
+    if (u && u !== baseURL) await setOllamaBaseURL(u);
+    if (m !== modelId) await setOllamaModelId(m);
+  };
+
+  const test = async () => {
+    setTestStatus("testing");
+    try {
+      const status = await invoke<number>("lm_ping", { baseUrl: urlDraft });
+      setTestStatus(status > 0 ? "ok" : "fail");
+    } catch {
+      setTestStatus("fail");
+    }
+  };
+
+  const fetchTags = async () => {
+    setLoadingTags(true);
+    try {
+      const list = await invoke<string[]>("ollama_tags", {
+        baseUrl: urlDraft,
+      });
+      setTags(list);
+    } catch {
+      setTags([]);
+    } finally {
+      setLoadingTags(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-0.5">
+        <Label>Local — Ollama</Label>
+        <span className="text-[10.5px] leading-relaxed text-muted-foreground">
+          Run models locally with <span className="font-mono">ollama serve</span>{" "}
+          — Gemma, Llama, Qwen, etc. Pull one first, e.g.{" "}
+          <span className="font-mono">ollama pull gemma3</span>.
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-2.5 rounded-lg border border-border/60 bg-card/60 px-3 py-2.5">
+        <FieldRow label="Base URL">
+          <div className="flex flex-1 gap-1.5">
+            <Input
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+              onBlur={() => {
+                const v = urlDraft.trim();
+                if (v && v !== baseURL) void setOllamaBaseURL(v);
+              }}
+              placeholder="http://localhost:11434/v1"
+              spellCheck={false}
+              className="h-8 flex-1 font-mono text-[11.5px]"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void test()}
+              disabled={!urlDraft.trim()}
+              className="h-8 px-3 text-[11px]"
+            >
+              Test
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void save()}
+              disabled={!dirty}
+              className="h-8 px-3 text-[11px]"
+            >
+              Save
+            </Button>
+          </div>
+        </FieldRow>
+
+        <FieldRow label="Model ID">
+          <div className="flex flex-1 gap-1.5">
+            <Input
+              value={modelDraft}
+              onChange={(e) => setModelDraft(e.target.value)}
+              onBlur={() => {
+                const v = modelDraft.trim();
+                if (v !== modelId) void setOllamaModelId(v);
+              }}
+              placeholder="gemma3, llama3.2, qwen2.5-coder:7b, …"
+              spellCheck={false}
+              className="h-8 flex-1 font-mono text-[11.5px]"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void fetchTags()}
+              disabled={!urlDraft.trim() || loadingTags}
+              className="h-8 gap-1.5 px-2.5 text-[11px]"
+              title="List installed Ollama models"
+            >
+              <HugeiconsIcon icon={RefreshIcon} size={12} strokeWidth={2} />
+              {loadingTags ? "…" : "Installed"}
+            </Button>
+          </div>
+        </FieldRow>
+
+        {tags.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5 pl-[76px]">
+            {tags.map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => {
+                  setModelDraft(t);
+                  void setOllamaModelId(t);
+                }}
+                className={cn(
+                  "rounded border border-border/60 px-2 py-0.5 font-mono text-[10.5px] transition-colors hover:bg-accent",
+                  t === modelId && "bg-accent/60",
+                )}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <StatusLine status={testStatus} />
+
+        {!modelId.trim() ? (
+          <p className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
+            Set the model id you pulled in Ollama. Click{" "}
+            <span className="font-medium">Installed</span> to list what's
+            available, then pick the default model in the block above.
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+const CUSTOM_PROVIDERS = [
+  { id: "ollama", label: "Ollama (local)" },
+  { id: "lmstudio", label: "LM Studio (local)" },
+  { id: "openai-compatible", label: "OpenAI-compatible endpoint" },
+] as const;
+
+function slugify(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "model"
+  );
+}
+
+function CustomModelsBlock() {
+  const customModels = usePreferencesStore((s) => s.customModels);
+  const [label, setLabel] = useState("");
+  const [remoteId, setRemoteId] = useState("");
+  const [provider, setProvider] =
+    useState<CustomModel["provider"]>("ollama");
+
+  const add = async () => {
+    const l = label.trim();
+    const r = remoteId.trim();
+    if (!l || !r) return;
+    let slug = slugify(l);
+    const taken = new Set(customModels.map((c) => c.id));
+    let id = makeCustomModelId(slug);
+    let n = 2;
+    while (taken.has(id)) id = makeCustomModelId(`${slug}-${n++}`);
+    const next: CustomModel[] = [
+      ...customModels,
+      { id, label: l, provider, remoteModelId: r },
+    ];
+    await setCustomModels(next);
+    setLabel("");
+    setRemoteId("");
+  };
+
+  const remove = async (id: string) => {
+    await setCustomModels(customModels.filter((c) => c.id !== id));
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-0.5">
+        <Label>Custom models</Label>
+        <span className="text-[10.5px] leading-relaxed text-muted-foreground">
+          Register any model id (e.g.{" "}
+          <span className="font-mono">mimo-v2.5-pro</span>,{" "}
+          <span className="font-mono">glm-4.6</span>) against a local server or
+          an OpenAI-compatible endpoint. It appears in the model picker.
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-2.5 rounded-lg border border-border/60 bg-card/60 px-3 py-2.5">
+        {customModels.length > 0 ? (
+          <div className="flex flex-col gap-1.5">
+            {customModels.map((c) => {
+              const info = customModelToInfo(c);
+              return (
+                <div
+                  key={c.id}
+                  className="flex items-center gap-2 rounded border border-border/50 bg-background/40 px-2.5 py-1.5"
+                >
+                  <div className="flex flex-1 flex-col">
+                    <span className="text-[11.5px]">{c.label}</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {info.description}
+                    </span>
+                  </div>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => void remove(c.id)}
+                    title="Remove"
+                    className="size-7 text-muted-foreground hover:text-destructive"
+                  >
+                    <HugeiconsIcon
+                      icon={Delete02Icon}
+                      size={12}
+                      strokeWidth={1.75}
+                    />
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        <FieldRow label="Name">
+          <Input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="MiMo v2.5 Pro"
+            spellCheck={false}
+            className="h-8 flex-1 text-[11.5px]"
+          />
+        </FieldRow>
+
+        <FieldRow label="Model ID">
+          <Input
+            value={remoteId}
+            onChange={(e) => setRemoteId(e.target.value)}
+            placeholder="mimo-v2.5-pro"
+            spellCheck={false}
+            className="h-8 flex-1 font-mono text-[11.5px]"
+          />
+        </FieldRow>
+
+        <FieldRow label="Served by">
+          <div className="flex flex-1 items-center gap-1.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-8 flex-1 justify-between gap-2 px-2.5 text-[11.5px]"
+                >
+                  <span>
+                    {CUSTOM_PROVIDERS.find((p) => p.id === provider)?.label}
+                  </span>
+                  <HugeiconsIcon
+                    icon={ArrowDown01Icon}
+                    size={11}
+                    strokeWidth={2}
+                    className="opacity-70"
+                  />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[240px]">
+                {CUSTOM_PROVIDERS.map((p) => (
+                  <DropdownMenuItem
+                    key={p.id}
+                    onSelect={() => setProvider(p.id)}
+                    className="text-[11.5px]"
+                  >
+                    {p.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              size="sm"
+              onClick={() => void add()}
+              disabled={!label.trim() || !remoteId.trim()}
+              className="h-8 gap-1.5 px-3 text-[11px]"
+            >
+              <HugeiconsIcon icon={Add01Icon} size={12} strokeWidth={2} />
+              Add
+            </Button>
+          </div>
+        </FieldRow>
+
+        <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+          For local providers, configure the base URL in the Ollama / LM Studio
+          block above. For an OpenAI-compatible endpoint, set its URL & key in
+          the block below.
+        </p>
       </div>
     </div>
   );

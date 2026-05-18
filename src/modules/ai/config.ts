@@ -10,7 +10,8 @@ export type ProviderId =
   | "deepseek"
   | "openrouter"
   | "openai-compatible"
-  | "lmstudio";
+  | "lmstudio"
+  | "ollama";
 
 export type ProviderInfo = {
   id: ProviderId;
@@ -93,6 +94,13 @@ export const PROVIDERS: readonly ProviderInfo[] = [
     keyringAccount: "",
     keyPrefix: null,
     consoleUrl: "https://lmstudio.ai/docs/basics/server",
+  },
+  {
+    id: "ollama",
+    label: "Ollama",
+    keyringAccount: "",
+    keyPrefix: null,
+    consoleUrl: "https://ollama.com/library",
   },
 ] as const;
 
@@ -521,6 +529,16 @@ export const MODELS = [
     description: "Local GGUF models via LM Studio.",
     capabilities: { intelligence: 3, speed: 3, cost: 5 },
   },
+
+  // ── Ollama (local; model id is user-supplied at runtime) ──────────────────
+  {
+    id: "ollama-local",
+    provider: "ollama",
+    label: "Ollama",
+    hint: "Local",
+    description: "Local models via `ollama serve` — Gemma, Llama, Qwen, …",
+    capabilities: { intelligence: 3, speed: 3, cost: 5 },
+  },
 ] as const satisfies readonly ModelInfo[];
 
 export type ModelId = (typeof MODELS)[number]["id"];
@@ -529,6 +547,60 @@ export function getModel(id: ModelId): ModelInfo {
   const m = MODELS.find((x) => x.id === id);
   if (!m) throw new Error(`Unknown model: ${id}`);
   return m;
+}
+
+/** A user-registered model bound to a configurable provider. Lets users add
+ *  arbitrary models (e.g. `mimo-v2.5-pro`, `glm-4.6`) running on a local
+ *  Ollama / LM Studio server or any OpenAI-compatible endpoint, without a
+ *  Terax release. The `remoteModelId` is what gets sent to the provider. */
+export type CustomModel = {
+  /** Stable local id, prefixed `custom:` to avoid colliding with MODELS. */
+  id: string;
+  /** Display name shown in pickers. */
+  label: string;
+  /** Which configurable provider serves it. */
+  provider: "ollama" | "lmstudio" | "openai-compatible";
+  /** The exact model id the provider expects (e.g. `gemma3:4b`). */
+  remoteModelId: string;
+  /** Optional context window for the usage indicator. */
+  contextLimit?: number;
+};
+
+export const CUSTOM_MODEL_ID_PREFIX = "custom:";
+
+export function isCustomModelId(id: string): boolean {
+  return id.startsWith(CUSTOM_MODEL_ID_PREFIX);
+}
+
+export function makeCustomModelId(slug: string): string {
+  return `${CUSTOM_MODEL_ID_PREFIX}${slug}`;
+}
+
+/** Project a CustomModel into the ModelInfo shape so existing pickers,
+ *  capability badges and context math work without special-casing. */
+export function customModelToInfo(c: CustomModel): ModelInfo {
+  return {
+    id: c.id,
+    provider: c.provider,
+    label: c.label,
+    hint: "Custom",
+    description: `${c.remoteModelId} — via ${c.provider}`,
+    capabilities: { intelligence: 3, speed: 3, cost: 5 },
+  };
+}
+
+/** Resolve any model id — built-in or user-registered `custom:*` — to a
+ *  ModelInfo. Returns null for an unknown custom id (e.g. one that was
+ *  deleted while still selected). Never throws, unlike {@link getModel}. */
+export function resolveModel(
+  id: string,
+  customModels: readonly CustomModel[] | undefined,
+): ModelInfo | null {
+  if (isCustomModelId(id)) {
+    const c = customModels?.find((x) => x.id === id);
+    return c ? customModelToInfo(c) : null;
+  }
+  return MODELS.find((x) => x.id === id) ?? null;
 }
 
 export const DEFAULT_MODEL_ID: ModelId = "gpt-5.4-mini";
@@ -579,6 +651,7 @@ export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "z-ai/glm-4.6": 128_000,
   "openai-compatible-custom": 128_000,
   "lmstudio-local": 32_000,
+  "ollama-local": 32_000,
 };
 
 export function getModelContextLimit(modelId: string | undefined): number {
@@ -632,6 +705,7 @@ export function estimateCost(
 /** Providers that do not require an API key (local servers, key-optional). */
 export const KEYLESS_PROVIDERS: readonly ProviderId[] = [
   "lmstudio",
+  "ollama",
   "openai-compatible",
 ] as const;
 
@@ -656,6 +730,7 @@ export const DEFAULT_AUTOCOMPLETE_MODEL: Partial<Record<ProviderId, string>> = {
   cerebras: "gpt-oss-120b",
   groq: "openai/gpt-oss-20b",
   lmstudio: "qwen2.5-coder-7b-instruct",
+  ollama: "qwen2.5-coder:7b",
   openai: "gpt-5.4-nano",
   anthropic: "claude-haiku-4-5",
   google: "gemini-2.5-flash",
@@ -673,6 +748,7 @@ export function getAutocompleteEligibleModels(): readonly ModelInfo[] {
 }
 
 export const LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1";
+export const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1";
 export const OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "";
 export const MAX_AGENT_STEPS = 24;
 export const TERMINAL_BUFFER_LINES = 300;

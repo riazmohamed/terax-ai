@@ -20,6 +20,7 @@ export const EMPTY_PROVIDER_KEYS: ProviderKeys = {
   openrouter: null,
   "openai-compatible": null,
   lmstudio: null,
+  ollama: null,
 };
 
 export async function getKey(provider: ProviderId): Promise<string | null> {
