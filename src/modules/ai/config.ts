@@ -8,6 +8,7 @@ export type ProviderId =
   | "cerebras"
   | "groq"
   | "deepseek"
+  | "mistral"
   | "openrouter"
   | "openai-compatible"
   | "lmstudio"
@@ -72,6 +73,13 @@ export const PROVIDERS: readonly ProviderInfo[] = [
     keyringAccount: "deepseek-api-key",
     keyPrefix: "sk-",
     consoleUrl: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    id: "mistral",
+    label: "Mistral",
+    keyringAccount: "mistral-api-key",
+    keyPrefix: null,
+    consoleUrl: "https://console.mistral.ai/api-keys/",
   },
   {
     id: "openrouter",
@@ -313,6 +321,35 @@ export const MODELS = [
     description: "Chain-of-thought at open-weight prices.",
     capabilities: { intelligence: 5, speed: 2, cost: 4 },
     tags: ["reasoning", "coding"],
+  },
+
+  // ── Mistral ────────────────────────────────────────────────────────────────
+  {
+    id: "mistral-large-latest",
+    provider: "mistral",
+    label: "Mistral Large 3",
+    hint: "Best",
+    description: "Flagship Mistral model with 128K context.",
+    capabilities: { intelligence: 5, speed: 3, cost: 3 },
+    tags: ["vision", "tools", "coding"],
+  },
+  {
+    id: "mistral-medium-latest",
+    provider: "mistral",
+    label: "Mistral Medium 3.5",
+    hint: "Balanced",
+    description: "Good balance of speed and intelligence.",
+    capabilities: { intelligence: 4, speed: 4, cost: 4 },
+    tags: ["vision", "tools"],
+  },
+  {
+    id: "codestral-latest",
+    provider: "mistral",
+    label: "Codestral",
+    hint: "Code",
+    description: "Purpose-built coding model from Mistral.",
+    capabilities: { intelligence: 4, speed: 4, cost: 4 },
+    tags: ["coding"],
   },
 
   // ── Cerebras (autocomplete-tier) ──────────────────────────────────────────
@@ -652,10 +689,18 @@ export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "openai-compatible-custom": 128_000,
   "lmstudio-local": 32_000,
   "ollama-local": 32_000,
+  "mistral-large-latest": 131_072,
+  "mistral-medium-latest": 32_768,
+  "codestral-latest": 256_000,
 };
 
-export function getModelContextLimit(modelId: string | undefined): number {
+export function getModelContextLimit(
+  modelId: string | undefined,
+  compatOverride?: number,
+): number {
   if (!modelId) return 128_000;
+  if (modelId === "openai-compatible-custom" && compatOverride)
+    return compatOverride;
   return MODEL_CONTEXT_LIMITS[modelId] ?? 128_000;
 }
 

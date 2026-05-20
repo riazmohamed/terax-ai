@@ -3,10 +3,12 @@ import {
   type GitRepoInfo,
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
 const AUTO_FETCH_LRU_LIMIT = 16;
+const FOCUS_REFRESH_MIN_INTERVAL_MS = 1500;
 
 export type SourceControlRefreshMode = "auto" | "always" | "never";
 export type SourceControlRemoteAction = "fetch" | "pull" | "push";
@@ -145,6 +147,8 @@ export function useSourceControl(
   contextPath: string | null,
   enabled: boolean = true,
 ): SourceControlSummary {
+  const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
+  const workspaceKey = workspaceScopeKey(workspaceEnv);
   const [state, setState] = useState<SourceControlSummaryState>({
     repo: null,
     status: null,
@@ -160,10 +164,7 @@ export function useSourceControl(
   const inflightModeRef = useRef<SourceControlRefreshMode>("never");
   const autoFetchByRepoRef = useRef(new Map<string, number>());
   const enabledRef = useRef(enabled);
-  // Path → resolved repo root (or null when path is not inside a repo).
-  // Lets us skip git_panel_snapshot when navigating inside an already-known
-  // repo (or between non-repo paths) and reuse the cheaper git_status call.
-  const repoLookupRef = useRef(new Map<string, string | null>());
+  const lastRefreshAtRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -172,6 +173,22 @@ export function useSourceControl(
   useEffect(() => {
     enabledRef.current = enabled;
   }, [enabled]);
+
+  useEffect(() => {
+    requestIdRef.current++;
+    inflightRef.current = null;
+    inflightModeRef.current = "never";
+    autoFetchByRepoRef.current.clear();
+    setState({
+      repo: null,
+      status: null,
+      hasRepo: false,
+      isLoading: false,
+      localError: null,
+      busyAction: null,
+      lastRemoteError: null,
+    });
+  }, [workspaceKey]);
 
   const applyStatus = useCallback(
     (updater: (status: GitStatusSnapshot) => GitStatusSnapshot) => {
@@ -203,31 +220,12 @@ export function useSourceControl(
         return;
       }
 
-      const lookup = repoLookupRef.current;
-      const cachedRoot = lookup.get(contextPath);
-      const reusableRoot = (() => {
-        if (cachedRoot !== undefined) return cachedRoot;
-        for (const [, root] of lookup) {
-          if (root && contextPath.startsWith(`${root}/`)) return root;
-        }
-        return undefined;
-      })();
-
-      if (reusableRoot === null) {
-        setState((current) =>
-          current.hasRepo || current.repo || current.status
-            ? {
-                ...current,
-                repo: null,
-                status: null,
-                hasRepo: false,
-                isLoading: false,
-                localError: null,
-              }
-            : current,
-        );
-        return;
-      }
+      const activeRoot = stateRef.current.repo?.repoRoot ?? null;
+      const reusableRoot =
+        activeRoot &&
+        (contextPath === activeRoot || contextPath.startsWith(`${activeRoot}/`))
+          ? activeRoot
+          : undefined;
 
       setState((current) => ({ ...current, isLoading: true, localError: null }));
 
@@ -236,21 +234,38 @@ export function useSourceControl(
         let status: GitStatusSnapshot | null;
 
         if (reusableRoot) {
-          repo = stateRef.current.repo ?? null;
-          status = await native.gitStatus(reusableRoot);
-          if (requestId !== requestIdRef.current) return;
-          if (!repo || repo.repoRoot !== reusableRoot) {
-            repo = {
-              repoRoot: reusableRoot,
-              branch: status.branch,
-              upstream: status.upstream,
-              isDetached: status.isDetached,
-            };
+          try {
+            repo = stateRef.current.repo ?? null;
+            status = await native.gitStatus(reusableRoot);
+            if (requestId !== requestIdRef.current) return;
+            if (!repo || repo.repoRoot !== reusableRoot) {
+              repo = {
+                repoRoot: reusableRoot,
+                branch: status.branch,
+                upstream: status.upstream,
+                isDetached: status.isDetached,
+              };
+            }
+          } catch {
+            const snapshot = await native.gitPanelSnapshot(contextPath);
+            if (requestId !== requestIdRef.current) return;
+            if (!snapshot.repo) {
+              setState((current) => ({
+                ...current,
+                repo: null,
+                status: null,
+                hasRepo: false,
+                isLoading: false,
+                localError: null,
+              }));
+              return;
+            }
+            repo = snapshot.repo;
+            status = snapshot.status ?? null;
           }
         } else {
           const snapshot = await native.gitPanelSnapshot(contextPath);
           if (requestId !== requestIdRef.current) return;
-          lookup.set(contextPath, snapshot.repo?.repoRoot ?? null);
           if (!snapshot.repo) {
             setState((current) => ({
               ...current,
@@ -313,13 +328,17 @@ export function useSourceControl(
         if (requestId !== requestIdRef.current) return;
         setState((current) => ({
           ...current,
+          repo: null,
+          hasRepo: false,
           status: null,
           isLoading: false,
           localError: normalizeError(error),
         }));
+      } finally {
+        lastRefreshAtRef.current = Date.now();
       }
     },
-    [contextPath],
+    [contextPath, workspaceKey],
   );
 
   const refresh = useCallback(
@@ -424,7 +443,7 @@ export function useSourceControl(
         window.clearTimeout(idle as number);
       }
     };
-  }, [refresh, contextPath, enabled]);
+  }, [refresh, contextPath, enabled, workspaceKey]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -433,6 +452,8 @@ export function useSourceControl(
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = 0;
+        const elapsed = Date.now() - lastRefreshAtRef.current;
+        if (elapsed < FOCUS_REFRESH_MIN_INTERVAL_MS) return;
         void refresh({ remote: "never" });
       }, 400);
     };

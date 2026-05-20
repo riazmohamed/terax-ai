@@ -9,6 +9,7 @@ import {
   CpuIcon,
   DeepseekIcon,
   GlobeIcon,
+  Hexagon01Icon,
   PlugIcon,
   ServerStack03Icon,
 } from "@hugeicons/core-free-icons";
@@ -22,6 +23,7 @@ const ICON_BY_PROVIDER = {
   cerebras: CpuIcon,
   groq: FlashIcon,
   deepseek: DeepseekIcon,
+  mistral: Hexagon01Icon,
   openrouter: GlobeIcon,
   "openai-compatible": PlugIcon,
   lmstudio: ComputerIcon,
