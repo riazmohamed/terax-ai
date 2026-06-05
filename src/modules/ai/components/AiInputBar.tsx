@@ -7,6 +7,8 @@ import {
   CodeIcon,
   HashtagIcon,
   Key01Icon,
+  Mic01Icon,
+  MicOff01Icon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -420,7 +422,34 @@ export function AiInputBar() {
                   "placeholder:text-muted-foreground/60",
                 )}
               />
-              <AgentSwitcher />
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant={c.voice.recording ? "destructive" : "ghost"}
+                  size="icon-xs"
+                  disabled={
+                    !c.voice.supported || !c.voice.hasKey || c.voice.transcribing
+                  }
+                  title={
+                    c.voice.recording
+                      ? "Stop speech input (Ctrl+S)"
+                      : c.voice.hasKey
+                        ? "Start speech input (Ctrl+S)"
+                        : "Add an OpenAI key to use speech input"
+                  }
+                  aria-label={
+                    c.voice.recording ? "Stop speech input" : "Start speech input"
+                  }
+                  onClick={c.toggleVoice}
+                >
+                  <HugeiconsIcon
+                    icon={c.voice.recording ? MicOff01Icon : Mic01Icon}
+                    size={13}
+                    strokeWidth={1.8}
+                  />
+                </Button>
+                <AgentSwitcher />
+              </div>
             </div>
           </PopoverAnchor>
           {fileTrigger ? (

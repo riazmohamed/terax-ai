@@ -2,6 +2,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
+import { ImagePreviewStack } from "@/modules/image-preview";
 import { MarkdownStack } from "@/modules/markdown";
 import { PreviewStack } from "@/modules/preview";
 import type { Tab } from "@/modules/tabs";
@@ -22,6 +23,9 @@ type Props = {
   onCwd: TerminalStackProps["onCwd"];
   onExit: TerminalStackProps["onExit"];
   onFocusLeaf: TerminalStackProps["onFocusLeaf"];
+  onSetTerminalLeafColor: TerminalStackProps["onSetLeafColor"];
+  onCloseTerminalLeaf: TerminalStackProps["onCloseLeaf"];
+  onToggleAiVoice: TerminalStackProps["onToggleAiVoice"];
   registerEditorHandle: EditorStackProps["registerHandle"];
   onEditorDirtyChange: EditorStackProps["onDirtyChange"];
   onEditorCloseTab: EditorStackProps["onCloseTab"];
@@ -47,6 +51,9 @@ export function WorkspaceSurface({
   onCwd,
   onExit,
   onFocusLeaf,
+  onSetTerminalLeafColor,
+  onCloseTerminalLeaf,
+  onToggleAiVoice,
   registerEditorHandle,
   onEditorDirtyChange,
   onEditorCloseTab,
@@ -62,6 +69,7 @@ export function WorkspaceSurface({
   const isEditorTab = kind === "editor";
   const isPreviewTab = kind === "preview";
   const isMarkdownTab = kind === "markdown";
+  const isImagePreviewTab = kind === "image-preview";
   const isAiDiffTab = kind === "ai-diff";
   const isGitDiffTab = kind === "git-diff" || kind === "git-commit-file";
   const isGitHistoryTab = kind === "git-history";
@@ -83,6 +91,9 @@ export function WorkspaceSurface({
           onCwd={onCwd}
           onExit={onExit}
           onFocusLeaf={onFocusLeaf}
+          onSetLeafColor={onSetTerminalLeafColor}
+          onCloseLeaf={onCloseTerminalLeaf}
+          onToggleAiVoice={onToggleAiVoice}
         />
       </div>
       <div
@@ -122,6 +133,15 @@ export function WorkspaceSurface({
         aria-hidden={!isMarkdownTab}
       >
         <MarkdownStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
+          !isImagePreviewTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isImagePreviewTab}
+      >
+        <ImagePreviewStack tabs={tabs} activeId={activeId} />
       </div>
       <div
         className={cn(

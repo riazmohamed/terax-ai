@@ -21,6 +21,7 @@ type Props = {
   initialCwd?: string;
   /** Enable command-block decorations (OSC 133) for this terminal. */
   blocks?: boolean;
+  paneBackground: string | undefined;
   onSearchReady?: (leafId: number, addon: SearchAddon) => void;
   onExit?: (leafId: number, code: number) => void;
   onCwd?: (leafId: number, cwd: string) => void;
@@ -34,6 +35,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       focused = true,
       initialCwd,
       blocks = false,
+      paneBackground,
       onSearchReady,
       onExit,
       onCwd,
@@ -52,6 +54,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       focused,
       initialCwd,
       blocks,
+      paneBackground,
       onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),
@@ -112,7 +115,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     }
 
     return (
-      <div ref={containerRef} className="zoom-exempt h-full w-full" style={hideStyle} />
+      <div
+        ref={containerRef}
+        className="zoom-exempt h-full w-full"
+        style={hideStyle}
+        onMouseDownCapture={() => session.focus()}
+      />
     );
   },
 );

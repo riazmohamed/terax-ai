@@ -29,6 +29,7 @@ export type ShortcutId =
   | "view.zenMode"
   | "ai.toggle"
   | "ai.askSelection"
+  | "ai.voice"
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
@@ -190,6 +191,12 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Ask AI about selection",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
+  },
+  {
+    id: "ai.voice",
+    label: "Toggle speech input",
+    group: "AI",
+    defaultBindings: [{ ctrl: true, key: "s" }],
   },
   {
     id: "sidebar.toggle",

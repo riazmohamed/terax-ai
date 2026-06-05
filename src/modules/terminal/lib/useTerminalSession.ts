@@ -33,6 +33,7 @@ import {
   poolSlotStats,
   refreshLeafSlot,
   releaseSlot,
+  setLeafPaneBackground,
   setSlotFocused,
 } from "./rendererPool";
 
@@ -42,9 +43,12 @@ type Callbacks = {
   onCwd?: (cwd: string) => void;
 };
 
+const MAX_PENDING_INPUT_CHARS = 64_000;
+
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  pendingInput: string;
   initialCwd: string | undefined;
   lastCwd: string | null;
   pendingExit: number | null;
@@ -53,12 +57,12 @@ type Session = {
   visibleNow: boolean;
   focusedNow: boolean;
   disposed: boolean;
-  ready: Promise<void>;
   cols: number;
   rows: number;
   container: HTMLDivElement | null;
   snapshot: string | null;
   searchQuery: string | null;
+  paneBackground: string | undefined;
   dormantRing: DormantRing;
   hasSlot: boolean;
   blocks: boolean;
@@ -91,7 +95,10 @@ function markSessionReady(leafId: number): void {
   }
 }
 
-export function whenSessionReady(leafId: number, timeoutMs = 4000): Promise<void> {
+export function whenSessionReady(
+  leafId: number,
+  timeoutMs = 4000,
+): Promise<void> {
   if (readyLeaves.has(leafId)) return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -108,9 +115,25 @@ export function whenSessionReady(leafId: number, timeoutMs = 4000): Promise<void
 
 export function writeToSession(leafId: number, data: string): boolean {
   const s = sessions.get(leafId);
-  if (!s || !s.pty) return false;
-  void s.pty.write(data);
+  if (!s) return false;
+  writePtyOrBuffer(s, data);
   return true;
+}
+
+function writePtyOrBuffer(s: Session, data: string): void {
+  if (!data || s.shellExited || s.disposed) return;
+  if (s.pty) {
+    void s.pty.write(data);
+    return;
+  }
+  s.pendingInput = `${s.pendingInput}${data}`.slice(-MAX_PENDING_INPUT_CHARS);
+}
+
+function flushPendingInput(s: Session): void {
+  if (!s.pty || !s.pendingInput) return;
+  const pending = s.pendingInput;
+  s.pendingInput = "";
+  void s.pty.write(pending);
 }
 
 /**
@@ -142,7 +165,7 @@ configureRendererPool({
     if (!s) return null;
     return {
       writeToPty: (data) => {
-        s.pty?.write(data);
+        writePtyOrBuffer(s, data);
       },
       resizePty: (cols, rows) => {
         s.cols = cols;
@@ -177,13 +200,18 @@ function ensureSession(
   leafId: number,
   initialCwd?: string,
   blocks = false,
+  paneBackground?: string,
 ): Session {
   const existing = sessions.get(leafId);
-  if (existing) return existing;
+  if (existing) {
+    existing.paneBackground = paneBackground;
+    return existing;
+  }
 
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    pendingInput: "",
     initialCwd,
     lastCwd: null,
     pendingExit: null,
@@ -192,12 +220,12 @@ function ensureSession(
     visibleNow: false,
     focusedNow: false,
     disposed: false,
-    ready: Promise.resolve(),
     cols: 0,
     rows: 0,
     container: null,
     snapshot: null,
     searchQuery: null,
+    paneBackground,
     dormantRing: new DormantRing(),
     hasSlot: false,
     blocks,
@@ -208,10 +236,11 @@ function ensureSession(
   };
   sessions.set(leafId, session);
 
-  session.ready = (async () => {
-    await ensureMonoFontsLoaded();
-    await document.fonts.ready;
-  })();
+  void ensureMonoFontsLoaded()
+    .then(() => {
+      if (!session.disposed) refreshLeafSlot(leafId);
+    })
+    .catch((e) => console.warn("[terax] terminal font load failed:", e));
 
   return session;
 }
@@ -274,6 +303,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     drainRing: (write) => s.dormantRing.drain(write),
     shellExited: s.shellExited,
     searchQuery: s.searchQuery,
+    paneBackground: s.paneBackground,
     cols: s.cols,
     rows: s.rows,
     registerOsc: (term) => {
@@ -338,6 +368,26 @@ function unbindLeafFromSlot(leafId: number, s: Session): void {
   s.hasSlot = false;
 }
 
+function ensurePtyOpening(leafId: number, s: Session): void {
+  if (s.pty || s.ptyOpening || s.shellExited || s.disposed) return;
+  s.ptyOpening = true;
+  openPtyForSession(leafId, s, s.initialCwd)
+    .then((pty) => {
+      s.ptyOpening = false;
+      if (s.disposed) {
+        pty.close();
+        return;
+      }
+      s.pty = pty;
+      flushPendingInput(s);
+      if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+    })
+    .catch((e) => {
+      s.ptyOpening = false;
+      console.error("[terax] openPty failed:", e);
+    });
+}
+
 function attachSession(
   leafId: number,
   container: HTMLDivElement,
@@ -349,24 +399,7 @@ function attachSession(
   s.container = container;
 
   if (s.visibleNow) bindLeafToSlot(leafId, s);
-
-  if (!s.pty && !s.ptyOpening && !s.shellExited) {
-    s.ptyOpening = true;
-    openPtyForSession(leafId, s, s.initialCwd)
-      .then((pty) => {
-        s.ptyOpening = false;
-        if (s.disposed) {
-          pty.close();
-          return;
-        }
-        s.pty = pty;
-        if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
-      })
-      .catch((e) => {
-        s.ptyOpening = false;
-        console.error("[terax] openPty failed:", e);
-      });
-  }
+  ensurePtyOpening(leafId, s);
 }
 
 function detachSession(leafId: number): void {
@@ -413,17 +446,26 @@ export async function respawnSession(
     return;
   }
   s.pty = pty;
+  flushPendingInput(s);
   if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
 }
 
-export async function leafHasForegroundProcess(leafId: number): Promise<boolean> {
+export async function leafHasForegroundProcess(
+  leafId: number,
+): Promise<boolean> {
   const s = sessions.get(leafId);
   if (!s?.pty || s.shellExited) return false;
   try {
-    const result = await invoke<boolean>("pty_has_foreground_process", { id: s.pty.id });
+    const result = await invoke<boolean>("pty_has_foreground_process", {
+      id: s.pty.id,
+    });
     return result;
   } catch (e) {
-    console.error("[terax] pty_has_foreground_process failed for leaf", leafId, e);
+    console.error(
+      "[terax] pty_has_foreground_process failed for leaf",
+      leafId,
+      e,
+    );
     return false;
   }
 }
@@ -456,6 +498,7 @@ type Options = {
   focused?: boolean;
   initialCwd?: string;
   blocks?: boolean;
+  paneBackground: string | undefined;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
@@ -468,29 +511,34 @@ export function useTerminalSession({
   focused = true,
   initialCwd,
   blocks = false,
+  paneBackground,
   onSearchReady,
   onExit,
   onCwd,
 }: Options) {
   const cbRef = useRef({ onSearchReady, onExit, onCwd });
   cbRef.current = { onSearchReady, onExit, onCwd };
+  const paneBackgroundRef = useRef(paneBackground);
+  paneBackgroundRef.current = paneBackground;
 
   useEffect(() => {
-    let cancelled = false;
-    const s = ensureSession(leafId, initialCwd, blocks);
-    s.ready.then(() => {
-      if (cancelled || s.disposed) return;
-      const node = container.current;
-      if (!node) return;
+    const s = ensureSession(
+      leafId,
+      initialCwd,
+      blocks,
+      paneBackgroundRef.current,
+    );
+    ensurePtyOpening(leafId, s);
+    const node = container.current;
+    if (node && !s.disposed) {
       attachSession(leafId, node, {
         onSearchReady: (a) => cbRef.current.onSearchReady?.(a),
         onExit: (c) => cbRef.current.onExit?.(c),
         onCwd: (c) => cbRef.current.onCwd?.(c),
       });
       if (s.visibleNow && s.focusedNow && !s.blocks) focusSlot(leafId);
-    });
+    }
     return () => {
-      cancelled = true;
       detachSession(leafId);
     };
   }, [leafId, container, initialCwd, blocks]);
@@ -498,7 +546,12 @@ export function useTerminalSession({
   const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
   useEffect(() => {
     if (!blocks) return;
-    const s = ensureSession(leafId, initialCwd, blocks);
+    const s = ensureSession(
+      leafId,
+      initialCwd,
+      blocks,
+      paneBackgroundRef.current,
+    );
     setBlockMode(s.blockMode);
     const cb = () => setBlockMode(sessions.get(leafId)?.blockMode ?? "prompt");
     s.blockListeners.add(cb);
@@ -506,6 +559,12 @@ export function useTerminalSession({
       s.blockListeners.delete(cb);
     };
   }, [leafId, blocks, initialCwd]);
+
+  useEffect(() => {
+    const s = sessions.get(leafId);
+    if (s) s.paneBackground = paneBackground;
+    setLeafPaneBackground(leafId, paneBackground);
+  }, [leafId, paneBackground]);
 
   const fontSize = usePreferencesStore((p) => p.terminalFontSize);
   const zoomLevel = usePreferencesStore((p) => p.zoomLevel);
@@ -562,7 +621,10 @@ export function useTerminalSession({
   }, [leafId, visible, focused, blocks]);
 
   const write = useCallback(
-    (data: string) => sessions.get(leafId)?.pty?.write(data),
+    (data: string) => {
+      const s = sessions.get(leafId);
+      if (s) writePtyOrBuffer(s, data);
+    },
     [leafId],
   );
 
@@ -606,13 +668,15 @@ export function useTerminalSession({
 
   const submitCommand = useCallback(
     (text: string) => {
-      sessions.get(leafId)?.pty?.write(`${text}\r`);
+      const s = sessions.get(leafId);
+      if (s) writePtyOrBuffer(s, `${text}\r`);
     },
     [leafId],
   );
 
   const interrupt = useCallback(() => {
-    sessions.get(leafId)?.pty?.write("\x03");
+    const s = sessions.get(leafId);
+    if (s) writePtyOrBuffer(s, "\x03");
   }, [leafId]);
 
   const selectBlockAt = useCallback(
@@ -681,8 +745,8 @@ export function terminalDebugStats() {
     domScreens: document.querySelectorAll(".xterm-screen").length,
     domRows: document.querySelectorAll(".xterm-rows > div").length,
     jsHeapBytes:
-      (performance as unknown as { memory?: { usedJSHeapSize: number } })
-        .memory?.usedJSHeapSize ?? null,
+      (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory
+        ?.usedJSHeapSize ?? null,
   };
 }
 

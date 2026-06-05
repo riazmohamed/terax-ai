@@ -3,6 +3,7 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
 import { PaneTreeView } from "./PaneTreeView";
 import type { TerminalPaneHandle } from "./TerminalPane";
+import type { TerminalPaneColorId } from "./lib/paneColors";
 import { leafIds } from "./lib/panes";
 
 type Props = {
@@ -14,6 +15,12 @@ type Props = {
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
+  onSetLeafColor: (
+    leafId: number,
+    color: TerminalPaneColorId | undefined,
+  ) => void;
+  onCloseLeaf: (leafId: number) => void;
+  onToggleAiVoice: () => void;
 };
 
 type Bundle = {
@@ -31,6 +38,9 @@ export function TerminalStack({
   onCwd,
   onExit,
   onFocusLeaf,
+  onSetLeafColor,
+  onCloseLeaf,
+  onToggleAiVoice,
 }: Props) {
   const terminals = useMemo(
     () => tabs.filter((t) => t.kind === "terminal"),
@@ -71,7 +81,8 @@ export function TerminalStack({
 
   useEffect(() => {
     const live = new Set<number>();
-    for (const t of terminals) for (const id of leafIds(t.paneTree)) live.add(id);
+    for (const t of terminals)
+      for (const id of leafIds(t.paneTree)) live.add(id);
     for (const id of bundles.current.keys()) {
       if (!live.has(id)) bundles.current.delete(id);
     }
@@ -81,6 +92,7 @@ export function TerminalStack({
     <div className="relative h-full w-full">
       {terminals.map((t) => {
         const tabVisible = t.id === activeId;
+        const canCloseLeaf = leafIds(t.paneTree).length > 1;
         return (
           <div
             key={t.id}
@@ -97,6 +109,10 @@ export function TerminalStack({
               activeLeafId={t.activeLeafId}
               blocks={t.blocks ?? false}
               onFocusLeaf={(leafId) => onFocusLeaf(t.id, leafId)}
+              onSetLeafColor={onSetLeafColor}
+              onCloseLeaf={onCloseLeaf}
+              onToggleAiVoice={onToggleAiVoice}
+              canCloseLeaf={canCloseLeaf}
               getBundle={getBundle}
             />
           </div>

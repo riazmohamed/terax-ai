@@ -338,6 +338,7 @@ mod windows {
             match prepare_ps_profile() {
                 Ok(profile) => {
                     cmd.arg("-NoLogo");
+                    cmd.arg("-NoProfile");
                     cmd.arg("-NoExit");
                     cmd.arg("-ExecutionPolicy");
                     cmd.arg("Bypass");

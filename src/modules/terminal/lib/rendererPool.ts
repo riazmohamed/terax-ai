@@ -22,6 +22,7 @@ export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const SNAPSHOT_SCROLLBACK_CAP = 5_000;
+const AI_VOICE_TOGGLE_REQUEST_EVENT = "terax:ai-toggle-voice-request";
 
 export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
@@ -46,6 +47,7 @@ export type Slot = {
   readonly searchAddon: SearchAddon;
   readonly serializeAddon: SerializeAddon;
   readonly host: HTMLDivElement;
+  paneBackground: string | undefined;
   webglAddon: WebglAddon | null;
   webglCanvases: HTMLCanvasElement[];
   currentLeafId: number | null;
@@ -137,6 +139,45 @@ export function pasteIntoLeaf(leafId: number, text: string): boolean {
   return true;
 }
 
+export function copyLeafSelection(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  const selection = slot?.term.getSelection() ?? "";
+  if (!selection) return false;
+  void writeTerminalClipboardText(selection);
+  return true;
+}
+
+export function pasteClipboardIntoLeaf(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  void pasteTerminalClipboard(slot.term);
+  return true;
+}
+
+export function selectAllLeaf(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  slot.term.selectAll();
+  return true;
+}
+
+export function clearLeafScreen(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  slot.term.clear();
+  return true;
+}
+
+export function setLeafPaneBackground(
+  leafId: number,
+  background: string | undefined,
+): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot || slot.paneBackground === background) return;
+  slot.paneBackground = background;
+  applySlotTheme(slot);
+}
+
 function pathsFromTerminalClipboardText(text: string): string[] {
   const snapshot = getFileClipboard();
   if (snapshot && (!text || clipboardTextMatchesPaths(text, snapshot.paths))) {
@@ -177,6 +218,16 @@ async function pasteTerminalClipboard(term: Terminal): Promise<void> {
   const text = await readTerminalPasteText();
   const payload = getTerminalPastePayload(text);
   if (payload) term.paste(payload);
+}
+
+function isAiVoiceToggle(event: KeyboardEvent): boolean {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    event.key.toLowerCase() === "s"
+  );
 }
 
 function getRecycler(): HTMLDivElement {
@@ -248,6 +299,7 @@ function createSlot(): Slot {
     searchAddon,
     serializeAddon,
     host,
+    paneBackground: undefined,
     webglAddon: null,
     webglCanvases: [],
     currentLeafId: null,
@@ -274,6 +326,14 @@ function createSlot(): Slot {
     // keyCode 229 ("Process") is what Chromium reports for every key
     // pressed inside an active IME session when isComposing is not yet set.
     if (event.isComposing || event.keyCode === 229) return false;
+
+    if (isAiVoiceToggle(event)) {
+      event.preventDefault();
+      if (event.type === "keydown") {
+        window.dispatchEvent(new Event(AI_VOICE_TOGGLE_REQUEST_EVENT));
+      }
+      return false;
+    }
 
     const leafId = slot.currentLeafId;
     if (leafId === null) return false;
@@ -378,6 +438,7 @@ export type AcquireParams = {
   drainRing: (write: (bytes: Uint8Array) => void) => void;
   shellExited: boolean;
   searchQuery: string | null;
+  paneBackground: string | undefined;
   cols: number;
   rows: number;
   registerOsc: (term: Terminal) => (() => void)[];
@@ -420,9 +481,18 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     p.container.appendChild(slot.host);
   }
 
+  slot.paneBackground = p.paneBackground;
+  applySlotTheme(slot);
   slot.term.options.disableStdin = p.shellExited;
   slot.term.clear();
   slot.term.reset();
+
+  for (const d of slot.oscDisposers) {
+    try {
+      d();
+    } catch {}
+  }
+  slot.oscDisposers = p.registerOsc(slot.term);
 
   if (
     p.cols > 0 &&
@@ -441,8 +511,8 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
   if (p.altScreen) {
     // Discard the dormant ring. TUI output is incremental cursor-positioned
-    // updates that can't be replayed coherently on top of a stale snapshot
-    // — see the SIGWINCH kick below, which makes the TUI redraw from scratch.
+    // updates that can't be replayed coherently on top of a stale snapshot.
+    // The SIGWINCH kick below makes the TUI redraw from scratch.
     p.drainRing(() => {});
   } else {
     p.drainRing((bytes) => slot.term.write(bytes));
@@ -450,13 +520,6 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   try {
     slot.term.write("\x1b[?25h");
   } catch {}
-
-  for (const d of slot.oscDisposers) {
-    try {
-      d();
-    } catch {}
-  }
-  slot.oscDisposers = p.registerOsc(slot.term);
 
   setupResizeObserver(slot, p);
   slot.fitAddon.fit();
@@ -514,6 +577,8 @@ function cancelPendingUnhide(slot: Slot): void {
 
 function rewireSlot(slot: Slot, p: AcquireParams): void {
   slot.lastUsedAt = performance.now();
+  slot.paneBackground = p.paneBackground;
+  applySlotTheme(slot);
   if (slot.host.parentNode !== p.container) {
     p.container.appendChild(slot.host);
   }
@@ -860,10 +925,15 @@ export function applyScrollback(value: number): void {
 }
 
 export function applyTheme(): void {
+  for (const slot of slots) applySlotTheme(slot);
+}
+
+function applySlotTheme(slot: Slot): void {
   const theme = buildTerminalTheme();
-  for (const slot of slots) {
-    slot.term.options.theme = theme;
-  }
+  slot.term.options.theme = slot.paneBackground
+    ? { ...theme, background: slot.paneBackground }
+    : theme;
+  slot.host.style.backgroundColor = slot.paneBackground ?? "";
 }
 
 export function focusSlot(leafId: number): void {

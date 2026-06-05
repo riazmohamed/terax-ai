@@ -4,7 +4,14 @@ import {
   isImageBlob,
   isImagePath,
 } from "@/modules/file-transfer/pathPayload";
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
 import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
@@ -43,6 +50,9 @@ export const MAX_TEXT_INLINE = 200_000;
 export const ACCEPTED_FILES =
   "image/*,.txt,.md,.json,.yaml,.yml,.toml,.sh,.zsh,.bash,.py,.js,.jsx,.ts,.tsx,.rs,.go,.java,.c,.cpp,.h,.hpp,.html,.css,.csv,.log,.env,.config,.conf,.ini,Dockerfile,.dockerfile";
 
+export const AI_VOICE_TOGGLE_EVENT = "terax:ai-toggle-voice";
+export const AI_VOICE_TOGGLE_REQUEST_EVENT = "terax:ai-toggle-voice-request";
+
 type Voice = ReturnType<typeof useWhisperRecording>;
 
 type ComposerCtx = {
@@ -66,6 +76,7 @@ type ComposerCtx = {
   submit: () => void;
   stop: () => void;
   voice: Voice;
+  toggleVoice: () => void;
   canSend: boolean;
 };
 
@@ -161,6 +172,20 @@ export function AiComposerProvider({ children }: ProviderProps) {
       requestAnimationFrame(() => textareaRef.current?.focus());
     },
   });
+
+  const toggleVoice = useCallback(() => {
+    if (voice.recording) {
+      voice.stop();
+      return;
+    }
+    if (!voice.transcribing) void voice.start();
+  }, [voice.recording, voice.start, voice.stop, voice.transcribing]);
+
+  useEffect(() => {
+    const onToggleVoice = () => toggleVoice();
+    window.addEventListener(AI_VOICE_TOGGLE_EVENT, onToggleVoice);
+    return () => window.removeEventListener(AI_VOICE_TOGGLE_EVENT, onToggleVoice);
+  }, [toggleVoice]);
 
   const insertTextAtCaret = (text: string) => {
     if (!text) return;
@@ -426,6 +451,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
     submit,
     stop,
     voice,
+    toggleVoice,
     canSend,
   };
 

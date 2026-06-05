@@ -22,7 +22,11 @@ import {
   useChatStore,
   useSelectionAskAi,
 } from "@/modules/ai";
-import { AiComposerProvider } from "@/modules/ai/lib/composer";
+import {
+  AI_VOICE_TOGGLE_EVENT,
+  AI_VOICE_TOGGLE_REQUEST_EVENT,
+  AiComposerProvider,
+} from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
 import {
   CommandPalette,
@@ -34,6 +38,7 @@ import {
   type EditorPaneHandle,
 } from "@/modules/editor";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
+import { isImagePath } from "@/modules/file-transfer/pathPayload";
 import type { GitHistorySearchHandle } from "@/modules/git-history";
 import {
   Header,
@@ -98,6 +103,7 @@ export default function App() {
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newImagePreviewTab,
     openAiDiffTab,
     closeAiDiffTab,
     openGitDiffTab,
@@ -108,6 +114,7 @@ export default function App() {
     selectByIndex,
     setLeafCwd,
     focusPane,
+    setLeafColor,
     focusNextPaneInTab,
     splitActivePane,
     closeActivePane,
@@ -303,6 +310,18 @@ export default function App() {
     }
   }, [hasComposer, panelOpen, openPanel, focusInput]);
 
+  const toggleAiVoice = useCallback(() => {
+    openPanel();
+    focusInput(null);
+    window.dispatchEvent(new Event(AI_VOICE_TOGGLE_EVENT));
+  }, [openPanel, focusInput]);
+
+  useEffect(() => {
+    window.addEventListener(AI_VOICE_TOGGLE_REQUEST_EVENT, toggleAiVoice);
+    return () =>
+      window.removeEventListener(AI_VOICE_TOGGLE_REQUEST_EVENT, toggleAiVoice);
+  }, [toggleAiVoice]);
+
   const attachSelection = useChatStore((s) => s.attachSelection);
 
   const handleAttachFileToAgent = useCallback(
@@ -389,17 +408,27 @@ export default function App() {
 
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
+      if (isImagePath(path)) {
+        newImagePreviewTab(path);
+        return;
+      }
       // Explorer defaults to preview (pin=false); explicit actions like
       // context-menu "Open" pass pin=true for a persistent tab.
       openFileTab(path, pin ?? false);
     },
-    [openFileTab],
+    [newImagePreviewTab, openFileTab],
   );
 
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
       for (const t of tabs) {
-        if (t.kind !== "editor") continue;
+        if (
+          t.kind !== "editor" &&
+          t.kind !== "markdown" &&
+          t.kind !== "image-preview"
+        ) {
+          continue;
+        }
         if (t.path === from) {
           const i = to.lastIndexOf("/");
           updateTab(t.id, { path: to, title: i === -1 ? to : to.slice(i + 1) });
@@ -425,7 +454,9 @@ export default function App() {
       : null;
 
   const activeFilePath = (() => {
-    if (activeTab?.kind === "editor") return activeTab.path;
+    if (activeTab?.kind === "editor" || activeTab?.kind === "image-preview") {
+      return activeTab.path;
+    }
     if (activeTab?.kind === "git-diff") {
       if (/^([A-Za-z]:|\/|\\)/.test(activeTab.path)) return activeTab.path;
       const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
@@ -440,7 +471,9 @@ export default function App() {
     return null;
   })();
   const explorerActiveFilePath =
-    activeTab?.kind === "editor" || activeTab?.kind === "markdown"
+    activeTab?.kind === "editor" ||
+    activeTab?.kind === "markdown" ||
+    activeTab?.kind === "image-preview"
       ? activeTab.path
       : null;
   const { sourceControl, toggleSourceControl, openGitGraphFromContext } =
@@ -518,6 +551,7 @@ export default function App() {
       "search.focus": () => searchInlineRef.current?.focus(),
       "ai.toggle": togglePanelAndFocus,
       "ai.askSelection": askFromSelection,
+      "ai.voice": toggleAiVoice,
       "shortcuts.open": () => setShortcutsOpen((v) => !v),
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
@@ -542,6 +576,7 @@ export default function App() {
       toggleSourceControl,
       togglePanelAndFocus,
       askFromSelection,
+      toggleAiVoice,
       toggleSidebar,
       toggleExplorerFocus,
       zoomIn,
@@ -869,6 +904,9 @@ export default function App() {
                       onCwd={handleTerminalCwd}
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
+                      onSetTerminalLeafColor={setLeafColor}
+                      onCloseTerminalLeaf={closePaneByLeaf}
+                      onToggleAiVoice={toggleAiVoice}
                       registerEditorHandle={registerEditorHandle}
                       onEditorDirtyChange={handleEditorDirty}
                       onEditorCloseTab={disposeTab}
