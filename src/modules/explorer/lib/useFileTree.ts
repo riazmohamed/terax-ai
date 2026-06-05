@@ -112,7 +112,9 @@ export function useFileTree(rootPath: string | null, options?: Options) {
       });
 
       const liveDirs = new Set(
-        entries.filter((e) => e.kind === "dir").map((e) => joinPath(path, e.name)),
+        entries
+          .filter((e) => e.kind === "dir")
+          .map((e) => joinPath(path, e.name)),
       );
       const removedRoots: string[] = [];
       for (const key of Object.keys(nodesRef.current)) {
@@ -145,7 +147,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           return changed ? n : c;
         });
         const toUnwatch: string[] = [];
-        for (const d of dead) if (watchedRef.current.delete(d)) toUnwatch.push(d);
+        for (const d of dead)
+          if (watchedRef.current.delete(d)) toUnwatch.push(d);
         watchRemove(toUnwatch);
       }
     } catch (e) {
@@ -362,6 +365,37 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     [fetchChildren, options],
   );
 
+  const copyInto = useCallback(
+    async (destinationDir: string, sources: readonly string[]) => {
+      const copied = await invoke<string[]>("fs_copy_into", {
+        destinationDir,
+        sources: [...sources],
+        workspace: currentWorkspaceEnv(),
+      });
+      await fetchChildren(destinationDir);
+      return copied;
+    },
+    [fetchChildren],
+  );
+
+  const writePastedBinary = useCallback(
+    async (
+      destinationDir: string,
+      fileName: string,
+      bytes: readonly number[],
+    ) => {
+      const path = await invoke<string>("fs_write_binary_file", {
+        destinationDir,
+        fileName,
+        bytes: [...bytes],
+        workspace: currentWorkspaceEnv(),
+      });
+      await fetchChildren(destinationDir);
+      return path;
+    },
+    [fetchChildren],
+  );
+
   return {
     nodes,
     expanded,
@@ -377,6 +411,8 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     cancelRename,
     commitRename,
     deletePath,
+    copyInto,
+    writePastedBinary,
     joinPath,
   };
 }

@@ -1,4 +1,6 @@
 import { detectMonoFontFamily } from "@/lib/fonts";
+import { getFileClipboard } from "@/modules/file-transfer/fileClipboardStore";
+import { parsePathText } from "@/modules/file-transfer/pathPayload";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -14,6 +16,7 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { formatDroppedPaths } from "./quoteShellPath";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
@@ -65,8 +68,7 @@ let recyclerEl: HTMLDivElement | null = null;
 let adapter: SlotAdapter | null = null;
 
 let windowActive =
-  typeof document === "undefined" ||
-  (!document.hidden && document.hasFocus());
+  typeof document === "undefined" || (!document.hidden && document.hasFocus());
 let windowActivityBound = false;
 let cursorBlinkEnabled = false;
 
@@ -133,6 +135,48 @@ export function pasteIntoLeaf(leafId: number, text: string): boolean {
   if (!slot) return false;
   slot.term.paste(text);
   return true;
+}
+
+function pathsFromTerminalClipboardText(text: string): string[] {
+  const snapshot = getFileClipboard();
+  if (snapshot && (!text || clipboardTextMatchesPaths(text, snapshot.paths))) {
+    return snapshot.paths;
+  }
+  return parsePathText(text);
+}
+
+function clipboardTextMatchesPaths(
+  text: string,
+  paths: readonly string[],
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed === paths.join("\n")) return true;
+  const parsed = parsePathText(trimmed);
+  return (
+    parsed.length === paths.length &&
+    parsed.every((p, index) => p === paths[index])
+  );
+}
+
+async function readTerminalPasteText(): Promise<string> {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return "";
+  }
+}
+
+function getTerminalPastePayload(text: string): string {
+  const paths = pathsFromTerminalClipboardText(text);
+  if (paths.length > 0) return formatDroppedPaths(paths);
+  return text;
+}
+
+async function pasteTerminalClipboard(term: Terminal): Promise<void> {
+  const text = await readTerminalPasteText();
+  const payload = getTerminalPastePayload(text);
+  if (payload) term.paste(payload);
 }
 
 function getRecycler(): HTMLDivElement {
@@ -260,22 +304,18 @@ function createSlot(): Slot {
       if (event.type === "keydown") bridge.writeToPty("\x1b\r");
       return false;
     }
-    if (isTerminalCopy(event)) {
-      if (event.type === "keydown" && slot.term.hasSelection()) {
+    const copyMode = terminalCopyMode(event, slot.term);
+    if (copyMode !== "none") {
+      if (copyMode === "copy-selection" && event.type === "keydown") {
         const sel = slot.term.getSelection();
-        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        if (sel) void writeTerminalClipboardText(sel);
       }
       event.preventDefault();
       return false;
     }
     if (isTerminalPaste(event)) {
       if (event.type === "keydown") {
-        void navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) slot.term.paste(text);
-          })
-          .catch(() => {});
+        void pasteTerminalClipboard(slot.term);
       }
       event.preventDefault();
       return false;
@@ -888,26 +928,72 @@ const IS_MAC =
   typeof navigator !== "undefined" &&
   /Mac|iPhone|iPad/.test(navigator.userAgent);
 
-function isTerminalCopy(e: KeyboardEvent): boolean {
-  return (
-    !IS_MAC &&
-    e.ctrlKey &&
-    e.shiftKey &&
-    !e.altKey &&
-    !e.metaKey &&
-    (e.code === "KeyC" || e.key === "c" || e.key === "C")
-  );
+type TerminalCopyMode = "none" | "copy-selection" | "copy-empty";
+
+function terminalCopyMode(e: KeyboardEvent, term: Terminal): TerminalCopyMode {
+  const isC = e.code === "KeyC" || e.key === "c" || e.key === "C";
+  if (!isC || e.altKey) return "none";
+
+  if (IS_MAC) {
+    if (!e.metaKey || e.ctrlKey) return "none";
+    return term.hasSelection() ? "copy-selection" : "copy-empty";
+  }
+
+  if (!e.ctrlKey || e.metaKey) return "none";
+  if (e.shiftKey) return term.hasSelection() ? "copy-selection" : "copy-empty";
+  return term.hasSelection() ? "copy-selection" : "none";
 }
 
 function isTerminalPaste(e: KeyboardEvent): boolean {
-  return (
-    !IS_MAC &&
-    e.ctrlKey &&
-    e.shiftKey &&
-    !e.altKey &&
-    !e.metaKey &&
-    (e.code === "KeyV" || e.key === "v" || e.key === "V")
-  );
+  const isV = e.code === "KeyV" || e.key === "v" || e.key === "V";
+  if (IS_MAC) {
+    return isV && e.metaKey && !e.ctrlKey && !e.altKey;
+  }
+  return isV && e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+async function writeTerminalClipboardText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    copyTextWithSelectionFallback(text);
+  }
+}
+
+function copyTextWithSelectionFallback(text: string): boolean {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+
+  const selection = document.getSelection();
+  const ranges: Range[] = [];
+  if (selection) {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      ranges.push(selection.getRangeAt(index).cloneRange());
+    }
+  }
+
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  } finally {
+    document.body.removeChild(textarea);
+    if (selection) {
+      selection.removeAllRanges();
+      for (const range of ranges) selection.addRange(range);
+    }
+  }
+
+  return copied;
 }
 
 function isShiftEnter(e: KeyboardEvent): boolean {

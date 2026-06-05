@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use std::{fs, io::Write};
@@ -9,6 +11,7 @@ use tempfile::NamedTempFile;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+const MAX_BINARY_WRITE_BYTES: usize = 25 * 1024 * 1024;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 #[derive(Serialize)]
@@ -137,14 +140,132 @@ pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<
 }
 
 #[tauri::command]
+pub fn fs_read_binary_file(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<Vec<u8>, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let p = resolve_path(&path, &workspace);
+    let meta = fs::metadata(&p).map_err(|e| {
+        log::debug!("fs_read_binary_file stat({}) failed: {e}", p.display());
+        e.to_string()
+    })?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {}", p.display()));
+    }
+    if meta.len() > MAX_READ_BYTES {
+        return Err(format!(
+            "file is too large: {} bytes exceeds {} bytes",
+            meta.len(),
+            MAX_READ_BYTES
+        ));
+    }
+    fs::read(&p).map_err(|e| {
+        log::debug!("fs_read_binary_file read({}) failed: {e}", p.display());
+        e.to_string()
+    })
+}
+
+#[tauri::command]
+pub fn fs_write_binary_file(
+    destination_dir: String,
+    file_name: String,
+    bytes: Vec<u8>,
+    workspace: Option<WorkspaceEnv>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let destination = resolve_path(&destination_dir, &workspace);
+    let path = write_binary_file_to_dir(&destination, &file_name, &bytes)?;
+    let _ = app.emit(
+        "fs:file-written",
+        FileWrittenEvent {
+            path: path.clone(),
+            source: Some("clipboard".to_string()),
+        },
+    );
+    Ok(path)
+}
+
+fn write_binary_file_to_dir(
+    destination: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.len() > MAX_BINARY_WRITE_BYTES {
+        return Err(format!(
+            "file is too large: {} bytes exceeds {} bytes",
+            bytes.len(),
+            MAX_BINARY_WRITE_BYTES
+        ));
+    }
+
+    let destination_meta = fs::metadata(destination).map_err(|e| {
+        log::debug!(
+            "fs_write_binary_file destination({}) failed: {e}",
+            destination.display()
+        );
+        e.to_string()
+    })?;
+    if !destination_meta.is_dir() {
+        return Err(format!(
+            "destination is not a directory: {}",
+            destination.display()
+        ));
+    }
+
+    let child_name = validate_child_file_name(file_name)?;
+    let destination_canonical = fs::canonicalize(destination).map_err(|e| e.to_string())?;
+    let target = super::conflict_free_child_path(&destination_canonical, &child_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|e| {
+            log::warn!(
+                "fs_write_binary_file create({}) failed: {e}",
+                target.display()
+            );
+            e.to_string()
+        })?;
+    file.write_all(bytes).map_err(|e| {
+        log::warn!(
+            "fs_write_binary_file write({}) failed: {e}",
+            target.display()
+        );
+        e.to_string()
+    })?;
+    file.sync_all().map_err(|e| {
+        log::warn!(
+            "fs_write_binary_file sync({}) failed: {e}",
+            target.display()
+        );
+        e.to_string()
+    })?;
+
+    Ok(super::to_canon(&target))
+}
+
+fn validate_child_file_name(file_name: &str) -> Result<OsString, String> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return Err("file name is empty".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
+        return Err(format!("invalid file name: {trimmed}"));
+    }
+    Ok(OsString::from(trimmed))
+}
+
+#[tauri::command]
 pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
-    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
-    let kind = if meta.is_dir() {
-        StatKind::Dir
-    } else if meta.file_type().is_symlink() {
+    let meta = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
+    let kind = if meta.file_type().is_symlink() {
         StatKind::Symlink
+    } else if meta.is_dir() {
+        StatKind::Dir
     } else {
         StatKind::File
     };
@@ -203,12 +324,58 @@ mod tests {
     }
 
     #[test]
+    fn read_binary_file_returns_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("image.png");
+        std::fs::write(&f, [0x89, b'P', b'N', b'G']).unwrap();
+
+        let bytes = fs_read_binary_file(f.to_string_lossy().into_owned(), None).unwrap();
+
+        assert_eq!(bytes, vec![0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
     fn overwrites_existing_target() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("note.txt");
         std::fs::write(&target, b"old").unwrap();
         write_atomic(&target, b"new").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn binary_write_creates_conflict_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("image.png");
+        std::fs::write(&occupied, b"keep").unwrap();
+
+        let written = write_binary_file_to_dir(dir.path(), "image.png", b"png").unwrap();
+        let copy = dir.path().join("image copy.png");
+
+        assert_eq!(written, crate::modules::fs::to_canon(&copy));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"png");
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn binary_write_rejects_invalid_child_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = write_binary_file_to_dir(dir.path(), "../escape.png", b"x").unwrap_err();
+
+        assert!(err.contains("invalid file name"), "got: {err}");
+        assert!(!dir.path().join("escape.png").exists());
+    }
+
+    #[test]
+    fn binary_write_rejects_oversize_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = vec![0; MAX_BINARY_WRITE_BYTES + 1];
+
+        let err = write_binary_file_to_dir(dir.path(), "big.png", &bytes).unwrap_err();
+
+        assert!(err.contains("file is too large"), "got: {err}");
+        assert!(!dir.path().join("big.png").exists());
     }
 
     #[cfg(unix)]

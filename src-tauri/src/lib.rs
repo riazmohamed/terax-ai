@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, fs, git, net, pty, secrets, shell, workspace};
+use modules::{agent, clipboard, fs, git, net, pty, secrets, shell, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -178,13 +178,17 @@ pub fn run() {
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,
+            fs::file::fs_read_binary_file,
             fs::file::fs_write_file,
+            fs::file::fs_write_binary_file,
             fs::file::fs_stat,
             fs::file::fs_canonicalize,
             fs::mutate::fs_create_file,
             fs::mutate::fs_create_dir,
             fs::mutate::fs_rename,
             fs::mutate::fs_delete,
+            fs::mutate::fs_copy_into,
+            clipboard::clipboard_read_file_paths,
             fs::watch::fs_watch_add,
             fs::watch::fs_watch_remove,
             fs::search::fs_search,

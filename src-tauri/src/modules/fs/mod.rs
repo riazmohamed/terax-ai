@@ -5,7 +5,8 @@ pub mod search;
 pub mod tree;
 pub mod watch;
 
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 /// The single canonical-to-display conversion: forward slashes, Windows
 /// verbatim `\\?\` prefix stripped. Route every such conversion through here.
@@ -20,6 +21,39 @@ pub fn to_canon(p: impl AsRef<Path>) -> String {
         // Backslashes are legal in Unix filenames; never rewrite them.
         s.into_owned()
     }
+}
+
+pub(crate) fn conflict_free_child_path(parent: &Path, name: &OsStr) -> PathBuf {
+    let original = parent.join(name);
+    if !original.exists() {
+        return original;
+    }
+
+    let name = name.to_string_lossy();
+    let (stem, extension) = split_copy_name(&name);
+    for index in 1usize.. {
+        let suffix = if index == 1 {
+            " copy".to_string()
+        } else {
+            format!(" copy {index}")
+        };
+        let candidate = parent.join(OsString::from(format!(
+            "{stem}{suffix}{extension}"
+        )));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded conflict-name loop must return")
+}
+
+fn split_copy_name(name: &str) -> (&str, &str) {
+    if let Some(index) = name.rfind('.') {
+        if index > 0 {
+            return (&name[..index], &name[index..]);
+        }
+    }
+    (name, "")
 }
 
 // Pure so it stays unit-testable on any host. `\\?\C:\x` -> `C:/x`.

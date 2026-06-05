@@ -1,65 +1,49 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useEffect } from "react";
+import {
+  NATIVE_PATH_DROP_EVENT,
+  NATIVE_PATH_DROP_TARGET_EVENT,
+  useNativePathDropRouter,
+  type NativePathDropEventDetail,
+  type NativePathDropTarget,
+} from "@/modules/file-transfer/useNativePathDropRouter";
 import { useTerminalDropStore } from "./dropStore";
 import { formatDroppedPaths } from "./quoteShellPath";
 import { pasteIntoLeaf } from "./rendererPool";
 
-// Tauri reports the drop point in physical pixels on some platforms and logical
-// on others; only scale down when it overflows the logical viewport.
-function leafIdAt(x: number, y: number): number | null {
-  let lx = x;
-  let ly = y;
-  if (x > window.innerWidth || y > window.innerHeight) {
-    const dpr = window.devicePixelRatio || 1;
-    lx = x / dpr;
-    ly = y / dpr;
-  }
-  const el = document.elementFromPoint(lx, ly);
-  const leafEl = el?.closest<HTMLElement>("[data-pane-leaf]");
-  if (!leafEl) return null;
-  const id = Number(leafEl.dataset.paneLeaf);
-  return Number.isFinite(id) ? id : null;
+function emitNativePathDropEvent(
+  eventName:
+    | typeof NATIVE_PATH_DROP_EVENT
+    | typeof NATIVE_PATH_DROP_TARGET_EVENT,
+  target: NativePathDropTarget | null,
+  paths: readonly string[],
+): void {
+  const detail: NativePathDropEventDetail = { target, paths: [...paths] };
+  window.dispatchEvent(new CustomEvent(eventName, { detail }));
 }
 
-/** Wires native OS file drops into the terminal pane under the cursor: shows a
- * drop overlay on that pane while dragging, and bracketed-pastes the
- * shell-quoted path(s) on drop. Drops outside any terminal leaf are ignored. */
+/** Wires native OS file drops into the target under the cursor. Terminal drops
+ * keep the existing bracketed shell-quoted paste behavior; other targets receive
+ * shared DOM events so modules stay decoupled. */
 export function useTerminalFileDrop(): void {
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    const setTarget = useTerminalDropStore.getState().setTarget;
-
-    void getCurrentWebview()
-      .onDragDropEvent((e) => {
-        const p = e.payload;
-        if (p.type === "enter" || p.type === "over") {
-          setTarget(leafIdAt(p.position.x, p.position.y));
-          return;
-        }
-        if (p.type === "leave") {
-          setTarget(null);
-          return;
-        }
-        if (p.type === "drop") {
-          setTarget(null);
-          if (!p.paths.length) return;
-          const leafId = leafIdAt(p.position.x, p.position.y);
-          if (leafId !== null) {
-            pasteIntoLeaf(leafId, formatDroppedPaths(p.paths));
-          }
-        }
-      })
-      .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      })
-      .catch((err) => console.error("[terax] drag-drop listen failed:", err));
-
-    return () => {
-      disposed = true;
-      setTarget(null);
-      unlisten?.();
-    };
-  }, []);
+  useNativePathDropRouter({
+    onTargetChange: (target, paths) => {
+      useTerminalDropStore
+        .getState()
+        .setTarget(target?.kind === "terminal" ? target.leafId : null);
+      emitNativePathDropEvent(NATIVE_PATH_DROP_TARGET_EVENT, target, paths);
+    },
+    onDrop: (target, paths) => {
+      useTerminalDropStore.getState().setTarget(null);
+      if (target?.kind === "terminal" && paths.length > 0) {
+        pasteIntoLeaf(target.leafId, formatDroppedPaths([...paths]));
+      }
+      emitNativePathDropEvent(NATIVE_PATH_DROP_EVENT, target, paths);
+    },
+    onLeave: () => {
+      useTerminalDropStore.getState().setTarget(null);
+      emitNativePathDropEvent(NATIVE_PATH_DROP_TARGET_EVENT, null, []);
+    },
+    onError: (error) => {
+      console.error("[terax] drag-drop listen failed:", error);
+    },
+  });
 }
