@@ -227,13 +227,20 @@ pub async fn ollama_tags(base_url: String) -> Result<Vec<String>, String> {
     let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
     let probe = format!("{root}/api/tags");
     let parsed = validate_url(&probe, true)?;
-    enforce_host_policy(&parsed, true).await?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?
+        .to_string();
+    // DNS-rebinding guard: resolve once, classify, then pin the connection
+    // to the vetted IPs (same pattern as lm_ping above).
+    let safe_ips = classify_and_collect_safe_ips(&host, true).await?;
 
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())?;
+        .redirect(reqwest::redirect::Policy::none());
+    let addrs: Vec<SocketAddr> = safe_ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+    builder = builder.resolve_to_addrs(&host, &addrs);
+    let client = builder.build().map_err(|e| e.to_string())?;
     let resp = client
         .get(parsed)
         .send()
