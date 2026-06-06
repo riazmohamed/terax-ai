@@ -5,12 +5,14 @@ import {
   leafIds,
   nextLeafId,
   removeLeaf,
+  setLeafColor as setLeafColorInTree,
   setLeafCwd as setLeafCwdInTree,
   siblingLeafOf,
   splitLeaf,
   type PaneNode,
   type SplitDir,
 } from "@/modules/terminal/lib/panes";
+import type { TerminalPaneColorId } from "@/modules/terminal/lib/paneColors";
 import { disposeSession } from "@/modules/terminal/lib/useTerminalSession";
 
 // Matches the renderer slot pool size — over this we'd evict an active leaf.
@@ -23,8 +25,11 @@ export type TerminalTab = {
   cwd?: string;
   paneTree: PaneNode;
   activeLeafId: number;
+  blocks?: boolean;
   /** AI agent cannot read buffer / context of this terminal. */
   private?: boolean;
+  /** User-set label that overrides the cwd-derived name. Survives cd. */
+  customTitle?: string;
 };
 
 export type EditorTab = {
@@ -51,6 +56,13 @@ export type PreviewTab = {
 export type MarkdownTab = {
   id: number;
   kind: "markdown";
+  title: string;
+  path: string;
+};
+
+export type ImagePreviewTab = {
+  id: number;
+  kind: "image-preview";
   title: string;
   path: string;
 };
@@ -105,6 +117,7 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
+  | ImagePreviewTab
   | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
@@ -116,6 +129,8 @@ export type TabPatch = Partial<{
   path: string;
   dirty: boolean;
   url: string;
+  /** Empty string resets a terminal tab to its cwd-derived name. */
+  customTitle: string;
 }>;
 
 function basename(path: string): string {
@@ -172,6 +187,53 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setActiveId(tabId);
     return tabId;
   }, []);
+
+  const newBlockTab = useCallback((cwd?: string) => {
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "terminal",
+        title: "blocks",
+        cwd,
+        paneTree: { kind: "leaf", id: leafId, cwd },
+        activeLeafId: leafId,
+        blocks: true,
+      },
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
+
+  useEffect(() => {
+    if (!import.meta.env?.DEV || typeof window === "undefined") return;
+    (
+      window as unknown as { __teraxNewBlockTab?: (cwd?: string) => number }
+    ).__teraxNewBlockTab = newBlockTab;
+  }, [newBlockTab]);
+
+  const newAgentTab = useCallback(
+    (cwd: string | undefined, title: string) => {
+      const tabId = nextIdRef.current++;
+      const leafId = nextIdRef.current++;
+      setTabs((t) => [
+        ...t,
+        {
+          id: tabId,
+          kind: "terminal",
+          title,
+          cwd,
+          paneTree: { kind: "leaf", id: leafId, cwd },
+          activeLeafId: leafId,
+        },
+      ]);
+      setActiveId(tabId);
+      return { tabId, leafId };
+    },
+    [],
+  );
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -391,6 +453,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return targetId;
   }, []);
 
+  const newImagePreviewTab = useCallback((path: string) => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find(
+        (t) => t.kind === "image-preview" && t.path === path,
+      );
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [
+        ...curr,
+        { id, kind: "image-preview", title: basename(path), path },
+      ];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   const openGitDiffTab = useCallback(
     (input: {
       path: string;
@@ -564,6 +647,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             ...x,
             ...(patch.title !== undefined && { title: patch.title }),
             ...(patch.cwd !== undefined && { cwd: patch.cwd }),
+            ...(patch.customTitle !== undefined && {
+              customTitle: patch.customTitle === "" ? undefined : patch.customTitle,
+            }),
           };
         }
         if (x.kind === "preview") {
@@ -627,6 +713,24 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     });
   }, []);
 
+  /** Set or clear a terminal leaf's accent color. */
+  const setLeafColor = useCallback(
+    (leafId: number, color: TerminalPaneColorId | undefined) => {
+      setTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
+          if (t.kind !== "terminal" || !hasLeaf(t.paneTree, leafId)) return t;
+          const paneTree = setLeafColorInTree(t.paneTree, leafId, color);
+          if (paneTree === t.paneTree) return t;
+          changed = true;
+          return { ...t, paneTree };
+        });
+        return changed ? next : curr;
+      });
+    },
+    [],
+  );
+
   const focusPane = useCallback((tabId: number, leafId: number) => {
     setTabs((curr) =>
       curr.map((t) => {
@@ -661,7 +765,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       let newLeafId: number | null = null;
       setTabs((curr) =>
         curr.map((t) => {
-          if (t.id !== tabId || t.kind !== "terminal") return t;
+          if (t.id !== tabId || t.kind !== "terminal" || t.blocks) return t;
           if (leafIds(t.paneTree).length >= MAX_PANES_PER_TAB) return t;
           const splitId = nextIdRef.current++;
           const leafId = nextIdRef.current++;
@@ -778,11 +882,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     activeId,
     setActiveId,
     newTab,
+    newBlockTab,
+    newAgentTab,
     newPrivateTab,
     openFileTab,
     pinTab,
     newPreviewTab,
     newMarkdownTab,
+    newImagePreviewTab,
     openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
@@ -794,6 +901,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     selectByIndex,
     setLeafCwd,
     focusPane,
+    setLeafColor,
     focusNextPaneInTab,
     splitActivePane,
     closeActivePane,

@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  imageMediaTypeForName,
+  isImageBlob,
+  isImagePath,
+} from "@/modules/file-transfer/pathPayload";
+import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -9,7 +15,7 @@ import {
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
 import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
-import { getOrCreateChat, useChatStore } from "../store/chatStore";
+import { getChat, useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 
@@ -29,9 +35,23 @@ type MessagePart =
   | { type: "text"; text: string }
   | { type: "file"; mediaType: string; url: string; filename?: string };
 
+type ReadResult =
+  | { kind: "text"; content: string; size: number }
+  | { kind: "binary"; size: number }
+  | { kind: "toolarge"; size: number; limit: number };
+
+type FileStat = {
+  size: number;
+  mtime: number;
+  kind: "file" | "dir" | "symlink";
+};
+
 export const MAX_TEXT_INLINE = 200_000;
 export const ACCEPTED_FILES =
   "image/*,.txt,.md,.json,.yaml,.yml,.toml,.sh,.zsh,.bash,.py,.js,.jsx,.ts,.tsx,.rs,.go,.java,.c,.cpp,.h,.hpp,.html,.css,.csv,.log,.env,.config,.conf,.ini,Dockerfile,.dockerfile";
+
+export const AI_VOICE_TOGGLE_EVENT = "terax:ai-toggle-voice";
+export const AI_VOICE_TOGGLE_REQUEST_EVENT = "terax:ai-toggle-voice-request";
 
 type Voice = ReturnType<typeof useWhisperRecording>;
 
@@ -40,9 +60,11 @@ type ComposerCtx = {
   value: string;
   setValue: React.Dispatch<React.SetStateAction<string>>;
   files: FileAttachment[];
-  addFiles: (list: FileList | null) => Promise<void>;
-  /** Attach a file by absolute path — used by the file explorer's "Attach to Agent". */
+  addFiles: (list: FileList | File[] | null) => Promise<void>;
+  /** Attach a file by absolute path, or insert its path if it cannot be inlined. */
   attachFileByPath: (path: string) => Promise<void>;
+  attachFilesFromPaths: (paths: readonly string[]) => Promise<void>;
+  insertTextAtCaret: (text: string) => void;
   removeFile: (id: string) => void;
   pickedSnippets: Snippet[];
   addSnippet: (s: Snippet) => void;
@@ -54,6 +76,7 @@ type ComposerCtx = {
   submit: () => void;
   stop: () => void;
   voice: Voice;
+  toggleVoice: () => void;
   canSend: boolean;
 };
 
@@ -96,6 +119,15 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
   }, [focusSignal, pendingPrefill, consumePrefill]);
 
+  // Re-focus the textarea whenever the agent finishes a response
+  const prevIsBusyRef = useRef(false);
+  useEffect(() => {
+    if (prevIsBusyRef.current && !isBusy) {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    }
+    prevIsBusyRef.current = isBusy;
+  }, [isBusy, textareaRef]);
+
   // Listen for explorer's "Attach to Agent" event.
   useEffect(() => {
     const onAttach = (e: Event) => {
@@ -122,9 +154,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
         next.push({
           id: sel.id,
           name:
-            sel.source === "editor"
-              ? "Editor selection"
-              : "Terminal selection",
+            sel.source === "editor" ? "Editor selection" : "Terminal selection",
           kind: "selection",
           mediaType: "text/plain",
           text: sel.text,
@@ -143,7 +173,46 @@ export function AiComposerProvider({ children }: ProviderProps) {
     },
   });
 
-  const addFiles = async (list: FileList | null) => {
+  const toggleVoice = useCallback(() => {
+    if (voice.recording) {
+      voice.stop();
+      return;
+    }
+    if (!voice.transcribing) void voice.start();
+  }, [voice.recording, voice.start, voice.stop, voice.transcribing]);
+
+  useEffect(() => {
+    const onToggleVoice = () => toggleVoice();
+    window.addEventListener(AI_VOICE_TOGGLE_EVENT, onToggleVoice);
+    return () => window.removeEventListener(AI_VOICE_TOGGLE_EVENT, onToggleVoice);
+  }, [toggleVoice]);
+
+  const insertTextAtCaret = (text: string) => {
+    if (!text) return;
+    setValue((current) => {
+      const el = textareaRef.current;
+      const canUseDomSelection = Boolean(el && el.value === current);
+      const start = canUseDomSelection
+        ? (el?.selectionStart ?? current.length)
+        : current.length;
+      const end = canUseDomSelection ? (el?.selectionEnd ?? start) : start;
+      const before = current.slice(0, start);
+      const after = current.slice(end);
+      const needsSpaceBefore = before.length > 0 && !/\s$/.test(before);
+      const needsSpaceAfter = after.length > 0 && !/^\s/.test(after);
+      const insert = `${needsSpaceBefore ? " " : ""}${text}${needsSpaceAfter ? " " : ""}`;
+      const caret = before.length + insert.length;
+      requestAnimationFrame(() => {
+        const target = textareaRef.current;
+        if (!target) return;
+        target.focus();
+        target.setSelectionRange(caret, caret);
+      });
+      return `${before}${insert}${after}`;
+    });
+  };
+
+  const addFiles = async (list: FileList | File[] | null) => {
     if (!list) return;
     const next: FileAttachment[] = [];
     for (const f of Array.from(list)) {
@@ -151,6 +220,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
       if (att) next.push(att);
     }
     if (next.length) setFiles((prev) => [...prev, ...next]);
+    useChatStore.getState().focusInput();
   };
 
   const removeFile = (id: string) =>
@@ -172,21 +242,49 @@ export function AiComposerProvider({ children }: ProviderProps) {
 
   const attachFileByPath = async (path: string) => {
     try {
-      type ReadResult =
-        | { kind: "text"; content: string; size: number }
-        | { kind: "binary"; size: number }
-        | { kind: "toolarge"; size: number; limit: number };
+      const stat = await invoke<FileStat>("fs_stat", {
+        path,
+        workspace: currentWorkspaceEnv(),
+      });
+      if (stat.kind !== "file") {
+        insertTextAtCaret(path);
+        useChatStore.getState().focusInput();
+        return;
+      }
+
+      const name = basename(path);
+      const id = `path-${path}`;
+      if (isImagePath(path)) {
+        const bytes = await invoke<number[]>("fs_read_binary_file", {
+          path,
+          workspace: currentWorkspaceEnv(),
+        });
+        const mediaType = imageMediaTypeForName(path);
+        setFiles((prev) => {
+          if (prev.some((f) => f.id === id)) return prev;
+          const att: FileAttachment = {
+            id,
+            name,
+            kind: "image",
+            mediaType,
+            url: bytesToDataUrl(bytes, mediaType),
+            size: stat.size,
+          };
+          return [...prev, att];
+        });
+        useChatStore.getState().focusInput();
+        return;
+      }
+
       const result = await invoke<ReadResult>("fs_read_file", {
         path,
         workspace: currentWorkspaceEnv(),
       });
       if (result.kind !== "text") {
-        // Binary/oversize files: skip (could surface a toast in future).
-        console.warn("attachFileByPath: skipped non-text file", path, result);
+        insertTextAtCaret(path);
+        useChatStore.getState().focusInput();
         return;
       }
-      const name = path.split("/").pop() || path;
-      const id = `path-${path}`;
       setFiles((prev) => {
         if (prev.some((f) => f.id === id)) return prev;
         const att: FileAttachment = {
@@ -199,10 +297,16 @@ export function AiComposerProvider({ children }: ProviderProps) {
         };
         return [...prev, att];
       });
-      // Open the AI panel & focus the input so the user sees the chip.
       useChatStore.getState().focusInput();
     } catch (e) {
       console.error("attachFileByPath failed:", e);
+      insertTextAtCaret(path);
+    }
+  };
+
+  const attachFilesFromPaths = async (paths: readonly string[]) => {
+    for (const path of paths) {
+      await attachFileByPath(path);
     }
   };
 
@@ -222,7 +326,11 @@ export function AiComposerProvider({ children }: ProviderProps) {
     let effectiveText = trimmed;
     let commandMarker: string | null = null;
     let commandSource = trimmed;
-    if (pickedCommands.length > 0 && !trimmed.startsWith("/") && !trimmed.startsWith("#")) {
+    if (
+      pickedCommands.length > 0 &&
+      !trimmed.startsWith("/") &&
+      !trimmed.startsWith("#")
+    ) {
       commandSource = `#${pickedCommands[0].name} ${trimmed}`.trim();
     }
     if (commandSource.startsWith("/") || commandSource.startsWith("#")) {
@@ -253,10 +361,8 @@ export function AiComposerProvider({ children }: ProviderProps) {
         (f) =>
           `<selection source="${f.source ?? "terminal"}">\n${f.text ?? ""}\n</selection>`,
       );
-    const { body: bodyAfterTokens, blocks: snippetBlocks } = expandSnippetTokens(
-      effectiveText,
-      useSnippetsStore.getState().snippets,
-    );
+    const { body: bodyAfterTokens, blocks: snippetBlocks } =
+      expandSnippetTokens(effectiveText, useSnippetsStore.getState().snippets);
     const seenHandles = new Set<string>();
     const allSnippetBlocks: string[] = [];
     for (const s of pickedSnippets) {
@@ -295,22 +401,27 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
 
     if (!sessionId) return;
-    const chat = getOrCreateChat(sessionId);
-    void chat.sendMessage({ role: "user", parts } as Parameters<
-      typeof chat.sendMessage
-    >[0]);
     const store = useChatStore.getState();
     store.patchAgentMeta({ hitStepCap: false, compactionNotice: null });
     if (!store.mini.open) store.openMini();
+    void (async () => {
+      const { getOrCreateChat } = await import("../store/chatRuntime");
+      const chat = getOrCreateChat(sessionId);
+      void chat.sendMessage({ role: "user", parts } as Parameters<
+        typeof chat.sendMessage
+      >[0]);
+    })();
     setValue("");
     setFiles([]);
     setPickedSnippets([]);
     setPickedCommands([]);
+    // Re-focus immediately after submit so the user can type a follow-up
+    requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
   const stop = () => {
     if (!sessionId) return;
-    void getOrCreateChat(sessionId).stop();
+    void getChat(sessionId)?.stop();
   };
 
   const canSend =
@@ -327,6 +438,8 @@ export function AiComposerProvider({ children }: ProviderProps) {
     files,
     addFiles,
     attachFileByPath,
+    attachFilesFromPaths,
+    insertTextAtCaret,
     removeFile,
     pickedSnippets,
     addSnippet,
@@ -338,6 +451,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
     submit,
     stop,
     voice,
+    toggleVoice,
     canSend,
   };
 
@@ -346,13 +460,13 @@ export function AiComposerProvider({ children }: ProviderProps) {
 
 async function readAttachment(file: File): Promise<FileAttachment | null> {
   const id = `${file.name}-${file.size}-${file.lastModified}`;
-  if (file.type.startsWith("image/")) {
+  if (isImageBlob(file, file.name)) {
     const url = await readAsDataURL(file);
     return {
       id,
       name: file.name,
       kind: "image",
-      mediaType: file.type || "image/png",
+      mediaType: file.type || imageMediaTypeForName(file.name),
       url,
       size: file.size,
     };
@@ -376,4 +490,19 @@ function readAsDataURL(file: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length ? (parts[parts.length - 1] ?? path) : path;
+}
+
+function bytesToDataUrl(bytes: readonly number[], mediaType: string): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.slice(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return `data:${mediaType};base64,${btoa(binary)}`;
 }

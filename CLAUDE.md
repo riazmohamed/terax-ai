@@ -73,3 +73,7 @@ pnpm test:watch     # Watch mode
 - **vite** — Frontend bundler & dev server
 - **tauri** — Desktop app CLI
 - **vitest** — Test runner (Vite-native)
+
+## Project Memory
+
+See TERAX.md for project memory loaded by the in-app agent.

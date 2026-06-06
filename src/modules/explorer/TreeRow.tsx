@@ -8,9 +8,10 @@ import {
 import { cn } from "@/lib/utils";
 import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { memo, useState } from "react";
+import { memo } from "react";
 import { InlineInput } from "./InlineInput";
 import {
+  copyFilePaths,
   copyToClipboard,
   relativePath,
   revealInFinder,
@@ -33,6 +34,11 @@ export type EntryRowProps = {
   isRenaming: boolean;
   onOpenFile: (path: string, pin?: boolean) => void;
   onSelectPath: (path: string) => void;
+  onRequestExplorerFocus?: () => void;
+  onHoverPath?: (path: string | null) => void;
+  onPasteInto?: (destinationDir: string) => void;
+  onRequestDelete?: (path: string) => void;
+  isDropTarget?: boolean;
   onRevealInTerminal?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   onOpenMarkdownPreview?: (path: string) => void;
@@ -55,14 +61,20 @@ function EntryRowImpl(props: EntryRowProps) {
     isRenaming,
     onOpenFile,
     onSelectPath,
+    onRequestExplorerFocus,
+    onHoverPath,
+    onPasteInto,
+    onRequestDelete,
+    isDropTarget,
     onRevealInTerminal,
     onAttachToAgent,
     onOpenMarkdownPreview,
   } = props;
 
-  const [isConfirming, setIsConfirming] = useState(false);
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
-  const createTarget = isDir ? path : path.slice(0, path.lastIndexOf("/")) || rootPath;
+  const createTarget = isDir
+    ? path
+    : path.slice(0, path.lastIndexOf("/")) || rootPath;
   const paddingLeft = 6 + depth * 12;
 
   const handleClick = () => {
@@ -70,6 +82,7 @@ function EntryRowImpl(props: EntryRowProps) {
     onSelectPath(path);
     if (isDir) tree.toggle(path);
     else onOpenFile(path);
+    requestAnimationFrame(() => onRequestExplorerFocus?.());
   };
 
   return (
@@ -96,11 +109,15 @@ function EntryRowImpl(props: EntryRowProps) {
           <button
             type="button"
             data-fs-path={path}
+            data-fs-kind={isDir ? "dir" : "file"}
             onClick={handleClick}
             onDoubleClick={() => !isDir && tree.beginRename(path)}
+            onMouseEnter={() => onHoverPath?.(path)}
+            onMouseLeave={() => onHoverPath?.(null)}
             className={cn(
               "group flex h-6 w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent/70",
               isSelected && "bg-accent text-foreground",
+              isDropTarget && "bg-primary/10 ring-1 ring-primary/45",
             )}
             style={{ paddingLeft }}
           >
@@ -178,6 +195,18 @@ function EntryRowImpl(props: EntryRowProps) {
         <ContextMenuSeparator />
         <ContextMenuItem
           className={COMPACT_ITEM}
+          onSelect={() => void copyFilePaths([path])}
+        >
+          Copy
+        </ContextMenuItem>
+        <ContextMenuItem
+          className={COMPACT_ITEM}
+          onSelect={() => onPasteInto?.(createTarget)}
+        >
+          Paste
+        </ContextMenuItem>
+        <ContextMenuItem
+          className={COMPACT_ITEM}
           onSelect={() => void copyToClipboard(path)}
         >
           Copy Path
@@ -199,17 +228,9 @@ function EntryRowImpl(props: EntryRowProps) {
         <ContextMenuItem
           className={COMPACT_ITEM}
           variant="destructive"
-          onSelect={(e) => {
-            e.preventDefault();
-            if (isConfirming) {
-              void tree.deletePath(path);
-            } else {
-              setIsConfirming(true);
-            }
-          }}
-          onMouseLeave={() => setTimeout(() => setIsConfirming(false), 1500)}
+          onSelect={() => onRequestDelete?.(path)}
         >
-          {isConfirming ? "Click again to confirm" : "Delete"}
+          Delete
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
@@ -225,7 +246,12 @@ export type PendingRowProps = {
   onCancel: () => void;
 };
 
-export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps) {
+export function PendingRow({
+  depth,
+  kind,
+  onCommit,
+  onCancel,
+}: PendingRowProps) {
   return (
     <div
       className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
@@ -233,7 +259,9 @@ export function PendingRow({ depth, kind, onCommit, onCancel }: PendingRowProps)
     >
       <span className="size-3.5 shrink-0" />
       <img
-        src={kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")}
+        src={
+          kind === "dir" ? folderIconUrl("", false) : fileIconUrl("untitled")
+        }
         alt=""
         className="size-4 shrink-0 opacity-70"
       />

@@ -1,10 +1,16 @@
 import {
   DEFAULT_AUTOCOMPLETE_MODEL,
   DEFAULT_MODEL_ID,
+  isCompatModelId,
+  isCustomModelId,
+  isKnownModelId,
   LMSTUDIO_DEFAULT_BASE_URL,
+  MLX_DEFAULT_BASE_URL,
   OLLAMA_DEFAULT_BASE_URL,
+  migrateLegacyCompatEndpoint,
   OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
   type AutocompleteProviderId,
+  type CustomEndpoint,
   type CustomModel,
   type ModelId,
 } from "@/modules/ai/config";
@@ -14,12 +20,17 @@ import { LazyStore } from "@tauri-apps/plugin-store";
 
 export type ThemePref = "system" | "light" | "dark";
 
+export const DEFAULT_THEME_ID = "terax-default";
+
+export type BackgroundKind = "none" | "image";
+
 export const EDITOR_THEMES = [
   "atomone",
   "aura",
   "copilot",
   "github-dark",
   "github-light",
+  "gruvbox-dark",
   "nord",
   "tokyo-night",
   "xcode-dark",
@@ -34,6 +45,7 @@ export const EDITOR_THEME_LABELS: Record<EditorThemeId, string> = {
   copilot: "Copilot",
   "github-dark": "GitHub Dark",
   "github-light": "GitHub Light",
+  "gruvbox-dark": "Gruvbox Dark",
   nord: "Nord",
   "tokyo-night": "Tokyo Night",
   "xcode-dark": "Xcode Dark",
@@ -42,6 +54,11 @@ export const EDITOR_THEME_LABELS: Record<EditorThemeId, string> = {
 
 export type Preferences = {
   theme: ThemePref;
+  themeId: string;
+  backgroundKind: BackgroundKind;
+  backgroundImageId: string | null;
+  backgroundOpacity: number;
+  backgroundBlur: number;
   defaultModelId: ModelId;
   editorTheme: EditorThemeId;
   customInstructions: string;
@@ -52,28 +69,41 @@ export type Preferences = {
   autocompleteModelId: string;
   lmstudioBaseURL: string;
   lmstudioModelId: string;
+  mlxBaseURL: string;
+  mlxModelId: string;
   ollamaBaseURL: string;
   ollamaModelId: string;
   openaiCompatibleBaseURL: string;
   openaiCompatibleModelId: string;
   customModels: CustomModel[];
   openaiCompatibleContextLimit: number;
+  customEndpoints: CustomEndpoint[];
+  openrouterModelId: string;
   favoriteModelIds: string[];
   recentModelIds: string[];
   vimMode: boolean;
   showHidden: boolean;
   terminalWebglEnabled: boolean;
+  terminalCursorBlink: boolean;
   terminalFontFamily: string;
   terminalLetterSpacing: number;
   terminalFontSize: number;
   terminalScrollback: number;
   lastWslDistro: string | null;
   zoomLevel: number;
+  agentNotifications: boolean;
   shortcuts: Record<ShortcutId, KeyBinding[]>;
+  editorAutoSave: boolean;
+  editorAutoSaveDelay: number;
 };
 
 const STORE_PATH = "terax-settings.json";
 const KEY_THEME = "theme";
+const KEY_THEME_ID = "themeId";
+const KEY_BG_KIND = "backgroundKind";
+const KEY_BG_IMAGE_ID = "backgroundImageId";
+const KEY_BG_OPACITY = "backgroundOpacity";
+const KEY_BG_BLUR = "backgroundBlur";
 const KEY_DEFAULT_MODEL = "defaultModelId";
 const KEY_EDITOR_THEME = "editorTheme";
 const KEY_CUSTOM_INSTRUCTIONS = "customInstructions";
@@ -84,25 +114,33 @@ const KEY_AUTOCOMPLETE_PROVIDER = "autocompleteProvider";
 const KEY_AUTOCOMPLETE_MODEL = "autocompleteModelId";
 const KEY_LMSTUDIO_BASE_URL = "lmstudioBaseURL";
 const KEY_LMSTUDIO_MODEL_ID = "lmstudioModelId";
+const KEY_MLX_BASE_URL = "mlxBaseURL";
+const KEY_MLX_MODEL_ID = "mlxModelId";
 const KEY_OLLAMA_BASE_URL = "ollamaBaseURL";
 const KEY_OLLAMA_MODEL_ID = "ollamaModelId";
 const KEY_OPENAI_COMPAT_BASE_URL = "openaiCompatibleBaseURL";
 const KEY_OPENAI_COMPAT_MODEL_ID = "openaiCompatibleModelId";
 const KEY_CUSTOM_MODELS = "customModels";
 const KEY_OPENAI_COMPAT_CONTEXT_LIMIT = "openaiCompatibleContextLimit";
+const KEY_CUSTOM_ENDPOINTS = "customEndpoints";
+const KEY_OPENROUTER_MODEL_ID = "openrouterModelId";
 const KEY_FAVORITE_MODELS = "favoriteModelIds";
 const KEY_RECENT_MODELS = "recentModelIds";
 const KEY_VIM_MODE = "vimMode";
 const KEY_SHOW_HIDDEN = "showHidden";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
+const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
+const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_SHORTCUTS = "shortcuts";
+const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
+const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 14;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -121,6 +159,11 @@ export const TERMINAL_SCROLLBACK_PRESETS = [
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
+  themeId: DEFAULT_THEME_ID,
+  backgroundKind: "none",
+  backgroundImageId: null,
+  backgroundOpacity: 0.5,
+  backgroundBlur: 0,
   defaultModelId: DEFAULT_MODEL_ID,
   editorTheme: "atomone",
   customInstructions: "",
@@ -131,25 +174,39 @@ export const DEFAULT_PREFERENCES: Preferences = {
   autocompleteModelId: DEFAULT_AUTOCOMPLETE_MODEL.cerebras ?? "",
   lmstudioBaseURL: LMSTUDIO_DEFAULT_BASE_URL,
   lmstudioModelId: "",
+  mlxBaseURL: MLX_DEFAULT_BASE_URL,
+  mlxModelId: "",
   ollamaBaseURL: OLLAMA_DEFAULT_BASE_URL,
   ollamaModelId: "",
   openaiCompatibleBaseURL: OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
   openaiCompatibleModelId: "",
   customModels: [],
   openaiCompatibleContextLimit: 128_000,
+  customEndpoints: [],
+  openrouterModelId: "",
   favoriteModelIds: [],
   recentModelIds: [],
   vimMode: false,
   showHidden: false,
   terminalWebglEnabled: true,
+  terminalCursorBlink: false,
   terminalFontFamily: "",
   terminalLetterSpacing: 0,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
   lastWslDistro: null,
   zoomLevel: 1.0,
+  agentNotifications: true,
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
+  editorAutoSave: false,
+  editorAutoSaveDelay: 1000,
 };
+
+/** Built-in, custom-endpoint (`compat-*`), and user-registered (`custom:*`)
+ *  ids are all selectable; anything else is stale and gets filtered out. */
+function isSelectableModelId(id: string): boolean {
+  return isKnownModelId(id) || isCompatModelId(id) || isCustomModelId(id);
+}
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
 
@@ -173,8 +230,24 @@ export async function loadPreferences(): Promise<Preferences> {
   const get = <T>(k: string): T | undefined => map.get(k) as T | undefined;
   return {
     theme: get<ThemePref>(KEY_THEME) ?? DEFAULT_PREFERENCES.theme,
-    defaultModelId:
-      get<ModelId>(KEY_DEFAULT_MODEL) ?? DEFAULT_PREFERENCES.defaultModelId,
+    themeId: get<string>(KEY_THEME_ID) ?? DEFAULT_PREFERENCES.themeId,
+    backgroundKind:
+      get<BackgroundKind>(KEY_BG_KIND) ?? DEFAULT_PREFERENCES.backgroundKind,
+    backgroundImageId:
+      get<string | null>(KEY_BG_IMAGE_ID) ??
+      DEFAULT_PREFERENCES.backgroundImageId,
+    backgroundOpacity: clampBgOpacity(
+      get<number>(KEY_BG_OPACITY) ?? DEFAULT_PREFERENCES.backgroundOpacity,
+    ),
+    backgroundBlur: clampBlur(
+      get<number>(KEY_BG_BLUR) ?? DEFAULT_PREFERENCES.backgroundBlur,
+    ),
+    defaultModelId: ((): ModelId => {
+      const stored = get<string>(KEY_DEFAULT_MODEL);
+      return stored && isKnownModelId(stored)
+        ? stored
+        : DEFAULT_PREFERENCES.defaultModelId;
+    })(),
     editorTheme:
       get<EditorThemeId>(KEY_EDITOR_THEME) ?? DEFAULT_PREFERENCES.editorTheme,
     customInstructions:
@@ -197,13 +270,17 @@ export async function loadPreferences(): Promise<Preferences> {
       get<string>(KEY_LMSTUDIO_BASE_URL) ?? DEFAULT_PREFERENCES.lmstudioBaseURL,
     lmstudioModelId:
       get<string>(KEY_LMSTUDIO_MODEL_ID) ?? DEFAULT_PREFERENCES.lmstudioModelId,
-    openaiCompatibleBaseURL:
-      get<string>(KEY_OPENAI_COMPAT_BASE_URL) ??
-      DEFAULT_PREFERENCES.openaiCompatibleBaseURL,
+    mlxBaseURL:
+      get<string>(KEY_MLX_BASE_URL) ?? DEFAULT_PREFERENCES.mlxBaseURL,
+    mlxModelId:
+      get<string>(KEY_MLX_MODEL_ID) ?? DEFAULT_PREFERENCES.mlxModelId,
     ollamaBaseURL:
       get<string>(KEY_OLLAMA_BASE_URL) ?? DEFAULT_PREFERENCES.ollamaBaseURL,
     ollamaModelId:
       get<string>(KEY_OLLAMA_MODEL_ID) ?? DEFAULT_PREFERENCES.ollamaModelId,
+    openaiCompatibleBaseURL:
+      get<string>(KEY_OPENAI_COMPAT_BASE_URL) ??
+      DEFAULT_PREFERENCES.openaiCompatibleBaseURL,
     openaiCompatibleModelId:
       get<string>(KEY_OPENAI_COMPAT_MODEL_ID) ??
       DEFAULT_PREFERENCES.openaiCompatibleModelId,
@@ -213,11 +290,26 @@ export async function loadPreferences(): Promise<Preferences> {
     openaiCompatibleContextLimit:
       get<number>(KEY_OPENAI_COMPAT_CONTEXT_LIMIT) ??
       DEFAULT_PREFERENCES.openaiCompatibleContextLimit,
-    favoriteModelIds:
+    customEndpoints: (() => {
+      const stored = get<CustomEndpoint[]>(KEY_CUSTOM_ENDPOINTS);
+      if (stored && stored.length > 0) return stored;
+      return migrateLegacyCompatEndpoint(
+        get<string>(KEY_OPENAI_COMPAT_BASE_URL) ?? "",
+        get<string>(KEY_OPENAI_COMPAT_MODEL_ID) ?? "",
+        get<number>(KEY_OPENAI_COMPAT_CONTEXT_LIMIT) ?? 128_000,
+        crypto.randomUUID().slice(0, 8),
+      );
+    })(),
+    openrouterModelId:
+      get<string>(KEY_OPENROUTER_MODEL_ID) ??
+      DEFAULT_PREFERENCES.openrouterModelId,
+    favoriteModelIds: (
       get<string[]>(KEY_FAVORITE_MODELS) ??
-      DEFAULT_PREFERENCES.favoriteModelIds,
-    recentModelIds:
-      get<string[]>(KEY_RECENT_MODELS) ?? DEFAULT_PREFERENCES.recentModelIds,
+      DEFAULT_PREFERENCES.favoriteModelIds
+    ).filter(isSelectableModelId),
+    recentModelIds: (
+      get<string[]>(KEY_RECENT_MODELS) ?? DEFAULT_PREFERENCES.recentModelIds
+    ).filter(isSelectableModelId),
     vimMode: get<boolean>(KEY_VIM_MODE) ?? DEFAULT_PREFERENCES.vimMode,
     showHidden:
       get<boolean>(KEY_SHOW_HIDDEN) ??
@@ -226,6 +318,9 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalWebglEnabled:
       get<boolean>(KEY_TERMINAL_WEBGL_ENABLED) ??
       DEFAULT_PREFERENCES.terminalWebglEnabled,
+    terminalCursorBlink:
+      get<boolean>(KEY_TERMINAL_CURSOR_BLINK) ??
+      DEFAULT_PREFERENCES.terminalCursorBlink,
     terminalFontFamily:
       get<string>(KEY_TERMINAL_FONT_FAMILY) ??
       DEFAULT_PREFERENCES.terminalFontFamily,
@@ -243,15 +338,60 @@ export async function loadPreferences(): Promise<Preferences> {
       get<string | null>(KEY_LAST_WSL_DISTRO) ??
       DEFAULT_PREFERENCES.lastWslDistro,
     zoomLevel: get<number>(KEY_ZOOM_LEVEL) ?? DEFAULT_PREFERENCES.zoomLevel,
+    agentNotifications:
+      get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
+      DEFAULT_PREFERENCES.agentNotifications,
     shortcuts:
       get<Record<ShortcutId, KeyBinding[]>>(KEY_SHORTCUTS) ??
       DEFAULT_PREFERENCES.shortcuts,
+    editorAutoSave:
+      get<boolean>(KEY_EDITOR_AUTO_SAVE) ??
+      DEFAULT_PREFERENCES.editorAutoSave,
+    editorAutoSaveDelay: clampAutoSaveDelay(
+      get<number>(KEY_EDITOR_AUTO_SAVE_DELAY) ??
+        DEFAULT_PREFERENCES.editorAutoSaveDelay,
+    ),
   };
 }
 
 export async function setTheme(value: ThemePref): Promise<void> {
   await writePref(KEY_THEME, value);
 }
+
+export async function setThemeId(value: string): Promise<void> {
+  await writePref(KEY_THEME_ID, value);
+}
+
+/** Slider stores 0..1. Actual rendered opacity is halved in SurfaceLayer
+ *  so the image never exceeds 50% — keeps UI/terminal readable at any setting. */
+export const BG_OPACITY_RENDER_FACTOR = 0.5;
+
+function clampBgOpacity(v: number): number {
+  if (!Number.isFinite(v)) return 0.7;
+  return Math.min(1, Math.max(0, v));
+}
+
+function clampBlur(v: number): number {
+  if (!Number.isFinite(v)) return 16;
+  return Math.min(64, Math.max(0, Math.round(v)));
+}
+
+export async function setBackgroundKind(value: BackgroundKind): Promise<void> {
+  await writePref(KEY_BG_KIND, value);
+}
+
+export async function setBackgroundImageId(value: string | null): Promise<void> {
+  await writePref(KEY_BG_IMAGE_ID, value);
+}
+
+export async function setBackgroundOpacity(value: number): Promise<void> {
+  await writePref(KEY_BG_OPACITY, clampBgOpacity(value));
+}
+
+export async function setBackgroundBlur(value: number): Promise<void> {
+  await writePref(KEY_BG_BLUR, clampBlur(value));
+}
+
 
 export async function setDefaultModel(value: ModelId): Promise<void> {
   await writePref(KEY_DEFAULT_MODEL, value);
@@ -295,6 +435,14 @@ export async function setLmstudioModelId(value: string): Promise<void> {
   await writePref(KEY_LMSTUDIO_MODEL_ID, value);
 }
 
+export async function setMlxBaseURL(value: string): Promise<void> {
+  await writePref(KEY_MLX_BASE_URL, value);
+}
+
+export async function setMlxModelId(value: string): Promise<void> {
+  await writePref(KEY_MLX_MODEL_ID, value);
+}
+
 export async function setOllamaBaseURL(value: string): Promise<void> {
   await writePref(KEY_OLLAMA_BASE_URL, value);
 }
@@ -324,6 +472,16 @@ export async function setOpenaiCompatibleContextLimit(
   await writePref(KEY_OPENAI_COMPAT_CONTEXT_LIMIT, clamped);
 }
 
+export async function setCustomEndpoints(
+  value: CustomEndpoint[],
+): Promise<void> {
+  await writePref(KEY_CUSTOM_ENDPOINTS, value);
+}
+
+export async function setOpenrouterModelId(value: string): Promise<void> {
+  await writePref(KEY_OPENROUTER_MODEL_ID, value);
+}
+
 export async function setFavoriteModelIds(value: string[]): Promise<void> {
   await writePref(KEY_FAVORITE_MODELS, value);
 }
@@ -342,6 +500,10 @@ export async function setShowHidden(value: boolean): Promise<void> {
 
 export async function setTerminalWebglEnabled(value: boolean): Promise<void> {
   await writePref(KEY_TERMINAL_WEBGL_ENABLED, value);
+}
+
+export async function setTerminalCursorBlink(value: boolean): Promise<void> {
+  await writePref(KEY_TERMINAL_CURSOR_BLINK, value);
 }
 
 export async function setTerminalFontFamily(value: string): Promise<void> {
@@ -383,16 +545,31 @@ export async function setZoomLevel(value: number): Promise<void> {
   await writePref(KEY_ZOOM_LEVEL, value);
 }
 
+function clampAutoSaveDelay(v: number): number {
+  if (!Number.isFinite(v)) return 1000;
+  return Math.min(60000, Math.max(100, Math.round(v)));
+}
+
+export async function setEditorAutoSave(value: boolean): Promise<void> {
+  await writePref(KEY_EDITOR_AUTO_SAVE, value);
+}
+
+export async function setEditorAutoSaveDelay(value: number): Promise<void> {
+  await writePref(KEY_EDITOR_AUTO_SAVE_DELAY, clampAutoSaveDelay(value));
+}
+
+export async function setAgentNotifications(value: boolean): Promise<void> {
+  await writePref(KEY_AGENT_NOTIFICATIONS, value);
+}
+
 export async function setShortcuts(
   value: Record<ShortcutId, KeyBinding[]> | {},
 ): Promise<void> {
-  await store.set(KEY_SHORTCUTS, value);
-  await store.save();
+  await writePref(KEY_SHORTCUTS, value);
 }
 
 export async function resetShortcuts(): Promise<void> {
-  await store.set(KEY_SHORTCUTS, DEFAULT_PREFERENCES.shortcuts);
-  await store.save();
+  await writePref(KEY_SHORTCUTS, DEFAULT_PREFERENCES.shortcuts);
 }
 
 export type PrefKey = keyof Preferences;
@@ -403,6 +580,11 @@ export async function onPreferencesChange(
 ): Promise<UnlistenFn> {
   const map: Record<string, PrefKey> = {
     [KEY_THEME]: "theme",
+    [KEY_THEME_ID]: "themeId",
+    [KEY_BG_KIND]: "backgroundKind",
+    [KEY_BG_IMAGE_ID]: "backgroundImageId",
+    [KEY_BG_OPACITY]: "backgroundOpacity",
+    [KEY_BG_BLUR]: "backgroundBlur",
     [KEY_DEFAULT_MODEL]: "defaultModelId",
     [KEY_EDITOR_THEME]: "editorTheme",
     [KEY_CUSTOM_INSTRUCTIONS]: "customInstructions",
@@ -413,24 +595,32 @@ export async function onPreferencesChange(
     [KEY_AUTOCOMPLETE_MODEL]: "autocompleteModelId",
     [KEY_LMSTUDIO_BASE_URL]: "lmstudioBaseURL",
     [KEY_LMSTUDIO_MODEL_ID]: "lmstudioModelId",
+    [KEY_MLX_BASE_URL]: "mlxBaseURL",
+    [KEY_MLX_MODEL_ID]: "mlxModelId",
     [KEY_OLLAMA_BASE_URL]: "ollamaBaseURL",
     [KEY_OLLAMA_MODEL_ID]: "ollamaModelId",
     [KEY_OPENAI_COMPAT_BASE_URL]: "openaiCompatibleBaseURL",
     [KEY_OPENAI_COMPAT_MODEL_ID]: "openaiCompatibleModelId",
     [KEY_CUSTOM_MODELS]: "customModels",
     [KEY_OPENAI_COMPAT_CONTEXT_LIMIT]: "openaiCompatibleContextLimit",
+    [KEY_CUSTOM_ENDPOINTS]: "customEndpoints",
+    [KEY_OPENROUTER_MODEL_ID]: "openrouterModelId",
     [KEY_FAVORITE_MODELS]: "favoriteModelIds",
     [KEY_RECENT_MODELS]: "recentModelIds",
     [KEY_VIM_MODE]: "vimMode",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
+    [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
     [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
     [KEY_ZOOM_LEVEL]: "zoomLevel",
+    [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
     [KEY_SHORTCUTS]: "shortcuts",
+    [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
+    [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
   };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().

@@ -5,6 +5,7 @@ import { IS_MAC, MOD_PROP } from "@/lib/platform";
  */
 
 export type ShortcutId =
+  | "commandPalette.open"
   | "tab.new"
   | "tab.newPrivate"
   | "tab.newPreview"
@@ -18,14 +19,17 @@ export type ShortcutId =
   | "pane.focusNext"
   | "pane.focusPrev"
   | "pane.source"
+  | "terminal.clear"
   | "search.focus"
   | "explorer.search"
   | "explorer.focus"
   | "view.zoomIn"
   | "view.zoomOut"
   | "view.zoomReset"
+  | "view.zenMode"
   | "ai.toggle"
   | "ai.askSelection"
+  | "ai.voice"
   | "shortcuts.open"
   | "settings.open"
   | "sidebar.toggle"
@@ -36,6 +40,7 @@ export type ShortcutGroup =
   | "General"
   | "Tabs"
   | "Panes"
+  | "Terminal"
   | "Search"
   | "AI"
   | "View"
@@ -58,6 +63,12 @@ export type Shortcut = {
 };
 
 export const SHORTCUTS: Shortcut[] = [
+  {
+    id: "commandPalette.open",
+    label: "Open command palette",
+    group: "General",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "p" }],
+  },
   {
     id: "settings.open",
     label: "Open settings",
@@ -131,6 +142,15 @@ export const SHORTCUTS: Shortcut[] = [
     defaultBindings: [{ [MOD_PROP]: true, key: "g" }],
   },
   {
+    id: "terminal.clear",
+    label: "Clear terminal",
+    group: "Terminal",
+    // macOS Terminal's ⌘K (clear scrollback, keep the prompt). Default only on
+    // macOS — on other platforms Ctrl+K is readline's kill-line, so we leave it
+    // unbound and let users assign their own in settings.
+    defaultBindings: IS_MAC ? [{ meta: true, key: "k" }] : [],
+  },
+  {
     id: "tab.next",
     label: "Next tab",
     group: "Tabs",
@@ -170,13 +190,25 @@ export const SHORTCUTS: Shortcut[] = [
     id: "ai.askSelection",
     label: "Ask AI about selection",
     group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "l" }],
+    defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
+  },
+  {
+    id: "ai.voice",
+    label: "Toggle speech input",
+    group: "AI",
+    defaultBindings: [{ ctrl: true, key: "s" }],
   },
   {
     id: "sidebar.toggle",
     label: "Toggle file explorer",
     group: "View",
-    defaultBindings: [{ [MOD_PROP]: true, key: "b" }],
+    // Plain Mod+B toggles the sidebar everywhere EXCEPT a focused terminal,
+    // where it's handed to the shell / Claude Code (its "run in background"
+    // key). Mod+Shift+B always toggles, including from inside a terminal.
+    defaultBindings: [
+      { [MOD_PROP]: true, key: "b" },
+      { [MOD_PROP]: true, shift: true, key: "b" },
+    ],
   },
   {
     id: "explorer.focus",
@@ -210,6 +242,12 @@ export const SHORTCUTS: Shortcut[] = [
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, key: "0" }],
   },
+  {
+    id: "view.zenMode",
+    label: "Toggle zen mode",
+    group: "View",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "z" }],
+  },
   // Editor entries are display-only: CodeMirror's historyKeymap binds these
   // keys natively. We register them here so the shortcuts dialog can surface
   // them — they don't have App-level handlers, so `useGlobalShortcuts` falls
@@ -233,6 +271,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",
   "Tabs",
   "Panes",
+  "Terminal",
   "View",
   "Search",
   "AI",

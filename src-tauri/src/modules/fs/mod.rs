@@ -3,18 +3,142 @@ pub mod grep;
 pub mod mutate;
 pub mod search;
 pub mod tree;
+pub mod watch;
 
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
-/// Frontend-facing path: forward-slash on every platform.
+/// The single canonical-to-display conversion: forward slashes, Windows
+/// verbatim `\\?\` prefix stripped. Route every such conversion through here.
 pub fn to_canon(p: impl AsRef<Path>) -> String {
-    let s = p.as_ref().to_string_lossy().into_owned();
+    let s = p.as_ref().to_string_lossy();
     #[cfg(windows)]
     {
-        s.replace('\\', "/")
+        strip_verbatim(&s)
     }
     #[cfg(not(windows))]
     {
-        s
+        // Backslashes are legal in Unix filenames; never rewrite them.
+        s.into_owned()
+    }
+}
+
+pub(crate) fn conflict_free_child_path(parent: &Path, name: &OsStr) -> PathBuf {
+    let original = parent.join(name);
+    if !original.exists() {
+        return original;
+    }
+
+    let name = name.to_string_lossy();
+    let (stem, extension) = split_copy_name(&name);
+    for index in 1usize.. {
+        let suffix = if index == 1 {
+            " copy".to_string()
+        } else {
+            format!(" copy {index}")
+        };
+        let candidate = parent.join(OsString::from(format!(
+            "{stem}{suffix}{extension}"
+        )));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded conflict-name loop must return")
+}
+
+fn split_copy_name(name: &str) -> (&str, &str) {
+    if let Some(index) = name.rfind('.') {
+        if index > 0 {
+            return (&name[..index], &name[index..]);
+        }
+    }
+    (name, "")
+}
+
+// Pure so it stays unit-testable on any host. `\\?\C:\x` -> `C:/x`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn strip_verbatim(s: &str) -> String {
+    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    };
+    stripped.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_verbatim;
+    use proptest::prelude::*;
+
+    #[test]
+    fn strips_drive_verbatim_prefix() {
+        assert_eq!(strip_verbatim(r"\\?\C:\Users\foo"), "C:/Users/foo");
+    }
+
+    #[test]
+    fn rewrites_verbatim_unc_to_share_path() {
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\server\share\dir"),
+            "//server/share/dir"
+        );
+    }
+
+    #[test]
+    fn passes_through_plain_windows_path() {
+        assert_eq!(strip_verbatim(r"C:\Users\foo"), "C:/Users/foo");
+    }
+
+    #[test]
+    fn leaves_forward_slash_path_unchanged() {
+        assert_eq!(strip_verbatim("C:/Users/foo"), "C:/Users/foo");
+    }
+
+    #[test]
+    fn handles_drive_root() {
+        assert_eq!(strip_verbatim(r"\\?\C:\"), "C:/");
+    }
+
+    proptest! {
+        #[test]
+        fn strip_verbatim_never_leaves_backslashes_or_prefix(s in r"[A-Za-z0-9\\/: .]{0,40}") {
+            let out = strip_verbatim(&s);
+            prop_assert!(!out.contains('\\'));
+            prop_assert!(!out.starts_with(r"\\?\"));
+        }
+
+        #[test]
+        fn strip_verbatim_is_idempotent(s in r"[A-Za-z0-9\\/: .]{0,40}") {
+            let once = strip_verbatim(&s);
+            prop_assert_eq!(strip_verbatim(&once), once);
+        }
+
+        #[test]
+        fn strip_verbatim_on_plain_input_equals_slash_swap(s in r"[A-Za-z0-9\\/: .]{0,40}") {
+            prop_assume!(!s.starts_with(r"\\?\"));
+            prop_assert_eq!(strip_verbatim(&s), s.replace('\\', "/"));
+        }
+
+        #[test]
+        fn strip_verbatim_drive_root_is_preserved(
+            drive in r"[A-Z]",
+            tail in r"[A-Za-z0-9\\/ .]{0,40}",
+        ) {
+            let input = format!(r"\\?\{drive}:\{tail}");
+            let out = strip_verbatim(&input);
+            let expected = format!("{drive}:/");
+            prop_assert!(out.starts_with(&expected));
+        }
+
+        #[test]
+        fn strip_verbatim_unc_becomes_double_slash(tail in r"[A-Za-z0-9\\/ .]{0,40}") {
+            let input = format!(r"\\?\UNC\{tail}");
+            let out = strip_verbatim(&input);
+            prop_assert!(out.starts_with("//"));
+            prop_assert!(!out.starts_with(r"\\?\"));
+        }
     }
 }

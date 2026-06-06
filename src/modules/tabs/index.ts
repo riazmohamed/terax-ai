@@ -7,6 +7,7 @@ export {
   type EditorTab,
   type PreviewTab,
   type MarkdownTab,
+  type ImagePreviewTab,
   type AiDiffTab,
   type GitDiffTab,
   type GitHistoryTab,
@@ -15,3 +16,4 @@ export {
   type TabPatch,
 } from "./lib/useTabs";
 export { useWorkspaceCwd } from "./lib/useWorkspaceCwd";
+export { useWindowTitle } from "./lib/useWindowTitle";

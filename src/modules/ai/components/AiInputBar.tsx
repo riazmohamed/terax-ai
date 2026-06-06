@@ -7,13 +7,29 @@ import {
   CodeIcon,
   HashtagIcon,
   Key01Icon,
+  Mic01Icon,
+  MicOff01Icon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
-import { useComposer, type FileAttachment } from "../lib/composer";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ClipboardEvent as ReactClipboardEvent,
+  DragEvent as ReactDragEvent,
+} from "react";
+import { usePresence } from "@/lib/usePresence";
+import { getFileClipboard } from "@/modules/file-transfer/fileClipboardStore";
+import {
+  filesFromDataTransfer,
+  parsePathText,
+} from "@/modules/file-transfer/pathPayload";
+import {
+  NATIVE_PATH_DROP_EVENT,
+  NATIVE_PATH_DROP_TARGET_EVENT,
+  type NativePathDropEventDetail,
+} from "@/modules/file-transfer/useNativePathDropRouter";
 import { useWorkspaceFiles } from "../hooks/useWorkspaceFiles";
+import { useComposer, type FileAttachment } from "../lib/composer";
 import { SLASH_COMMANDS } from "../lib/slashCommands";
 import type { Snippet } from "../lib/snippets";
 import { useChatStore } from "../store/chatStore";
@@ -26,6 +42,7 @@ type SnippetTrigger = {
   start: number;
   end: number;
   query: string;
+  char: "#" | "/";
 };
 
 type FileTrigger = {
@@ -40,12 +57,12 @@ function detectSnippetTrigger(
 ): SnippetTrigger | null {
   for (let i = caret - 1; i >= 0; i--) {
     const ch = value[i];
-    if (ch === "#") {
+    if (ch === "#" || ch === "/") {
       const prev = i === 0 ? " " : value[i - 1];
       if (!/\s/.test(prev)) return null;
       const slice = value.slice(i + 1, caret);
       if (!/^[a-z0-9-]*$/i.test(slice)) return null;
-      return { start: i, end: caret, query: slice.toLowerCase() };
+      return { start: i, end: caret, query: slice.toLowerCase(), char: ch };
     }
     if (/\s/.test(ch)) return null;
     if (!/[a-z0-9-]/i.test(ch)) return null;
@@ -53,10 +70,7 @@ function detectSnippetTrigger(
   return null;
 }
 
-function detectFileTrigger(
-  value: string,
-  caret: number,
-): FileTrigger | null {
+function detectFileTrigger(value: string, caret: number): FileTrigger | null {
   for (let i = caret - 1; i >= 0; i--) {
     const ch = value[i];
     if (ch === "@") {
@@ -70,14 +84,40 @@ function detectFileTrigger(
   return null;
 }
 
+function pathsFromTransferText(text: string): string[] {
+  const snapshot = getFileClipboard();
+  if (snapshot && (!text || clipboardTextMatchesPaths(text, snapshot.paths))) {
+    return snapshot.paths;
+  }
+  return parsePathText(text);
+}
+
+function clipboardTextMatchesPaths(
+  text: string,
+  paths: readonly string[],
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed === paths.join("\n")) return true;
+  const parsed = parsePathText(trimmed);
+  return (
+    parsed.length === paths.length &&
+    parsed.every((p, index) => p === paths[index])
+  );
+}
+
 export function AiInputBar() {
   const c = useComposer();
   const snippets = useSnippetsStore((s) => s.snippets);
   const workspaceRoot = useChatStore((s) => s.live.getWorkspaceRoot());
+  const openPanel = useChatStore((s) => s.openPanel);
+  const focusInput = useChatStore((s) => s.focusInput);
 
   const [trigger, setTrigger] = useState<SnippetTrigger | null>(null);
   const [fileTrigger, setFileTrigger] = useState<FileTrigger | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [isBrowserDragActive, setIsBrowserDragActive] = useState(false);
+  const [isNativeDropActive, setIsNativeDropActive] = useState(false);
   const workspaceFiles = useWorkspaceFiles(workspaceRoot, fileTrigger !== null);
 
   const [fileQuery, setFileQuery] = useState("");
@@ -117,6 +157,7 @@ export function AiInputBar() {
         (c) => !q || c.name.includes(q) || c.label.toLowerCase().includes(q),
       )
       .map((command) => ({ kind: "command", command }));
+    if (trigger.char === "/") return cmdItems;
     const snipItems: PickerItem[] = snippets
       .filter(
         (s) =>
@@ -207,20 +248,107 @@ export function AiInputBar() {
     if (it) onPickItem(it);
   };
 
+  const attachFilesAndPaths = async (
+    files: readonly File[],
+    paths: readonly string[],
+  ) => {
+    if (files.length > 0) await c.addFiles([...files]);
+    if (paths.length > 0) await c.attachFilesFromPaths(paths);
+    if (files.length > 0 || paths.length > 0) {
+      openPanel();
+      focusInput();
+    }
+  };
+
+  const transferPayload = (dataTransfer: DataTransfer) => {
+    const files = filesFromDataTransfer(dataTransfer);
+    const text =
+      dataTransfer.getData("text/uri-list") ||
+      dataTransfer.getData("text/plain");
+    const paths = pathsFromTransferText(text);
+    return { files, paths };
+  };
+
+  const onPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const { files, paths } = transferPayload(event.clipboardData);
+    if (files.length === 0 && paths.length === 0) return;
+    event.preventDefault();
+    void attachFilesAndPaths(files, paths);
+  };
+
+  const onDragOver = (event: ReactDragEvent<HTMLFieldSetElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsBrowserDragActive(true);
+  };
+
+  const onDragLeave = (event: ReactDragEvent<HTMLFieldSetElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    setIsBrowserDragActive(false);
+  };
+
+  const onDrop = (event: ReactDragEvent<HTMLFieldSetElement>) => {
+    event.preventDefault();
+    setIsBrowserDragActive(false);
+    const { files, paths } = transferPayload(event.dataTransfer);
+    void attachFilesAndPaths(files, paths);
+  };
+
+  useEffect(() => {
+    const onNativeTarget = (event: Event) => {
+      const detail = (event as CustomEvent<NativePathDropEventDetail>).detail;
+      setIsNativeDropActive(detail.target?.kind === "ai-input");
+    };
+    const onNativeDrop = (event: Event) => {
+      const detail = (event as CustomEvent<NativePathDropEventDetail>).detail;
+      setIsNativeDropActive(false);
+      if (detail.target?.kind !== "ai-input" || detail.paths.length === 0)
+        return;
+      openPanel();
+      focusInput();
+      void c.attachFilesFromPaths(detail.paths);
+    };
+    window.addEventListener(NATIVE_PATH_DROP_TARGET_EVENT, onNativeTarget);
+    window.addEventListener(NATIVE_PATH_DROP_EVENT, onNativeDrop);
+    return () => {
+      window.removeEventListener(NATIVE_PATH_DROP_TARGET_EVENT, onNativeTarget);
+      window.removeEventListener(NATIVE_PATH_DROP_EVENT, onNativeDrop);
+    };
+  }, [c, focusInput, openPanel]);
+
   const voiceLabel = c.voice.recording
     ? "Listening…"
     : c.voice.transcribing
       ? "Transcribing…"
       : null;
+  const voiceRow = usePresence(Boolean(voiceLabel), 180);
+  const lastVoiceLabel = useRef("");
+  if (voiceLabel) lastVoiceLabel.current = voiceLabel;
+
+  const dropActive = isBrowserDragActive || isNativeDropActive;
 
   return (
-    <div className="shrink-0 border-t border-border/60 bg-card/40 px-3 py-2">
+    <fieldset
+      data-ai-input-bar="true"
+      className="m-0 min-w-0 shrink-0 border-x-0 border-b-0 border-t border-border/60 bg-card/40 px-3 py-2"
+      aria-label="AI input file drop target"
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <div
         className={cn(
-          "flex flex-col gap-1.5 rounded-lg px-1 py-1",
+          "relative flex flex-col gap-1.5 rounded-lg px-1 py-1",
           "transition-colors focus-within:border-border",
+          dropActive && "bg-primary/5 ring-1 ring-primary/40",
         )}
       >
+        {dropActive ? (
+          <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-lg border border-primary/35 bg-background/70 text-xs font-medium text-foreground shadow-lg backdrop-blur-sm">
+            Drop files or paths to attach
+          </div>
+        ) : null}
         <ChipsRow
           files={c.files}
           onRemoveFile={c.removeFile}
@@ -243,6 +371,7 @@ export function AiInputBar() {
                 ref={c.textareaRef}
                 value={c.value}
                 onChange={(e) => c.setValue(e.target.value)}
+                onPaste={onPaste}
                 onKeyUp={updateTrigger}
                 onClick={updateTrigger}
                 onSelect={updateTrigger}
@@ -288,13 +417,39 @@ export function AiInputBar() {
                 }}
                 placeholder="Ask Terax anything   -   # for snippets and commands, @ for files"
                 rows={1}
-                disabled={c.isBusy}
                 className={cn(
                   "max-h-40 flex-1 resize-none bg-transparent text-[13px] leading-relaxed outline-none",
                   "placeholder:text-muted-foreground/60",
                 )}
               />
-              <AgentSwitcher />
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant={c.voice.recording ? "destructive" : "ghost"}
+                  size="icon-xs"
+                  disabled={
+                    !c.voice.supported || !c.voice.hasKey || c.voice.transcribing
+                  }
+                  title={
+                    c.voice.recording
+                      ? "Stop speech input (Ctrl+S)"
+                      : c.voice.hasKey
+                        ? "Start speech input (Ctrl+S)"
+                        : "Add an OpenAI key to use speech input"
+                  }
+                  aria-label={
+                    c.voice.recording ? "Stop speech input" : "Start speech input"
+                  }
+                  onClick={c.toggleVoice}
+                >
+                  <HugeiconsIcon
+                    icon={c.voice.recording ? MicOff01Icon : Mic01Icon}
+                    size={13}
+                    strokeWidth={1.8}
+                  />
+                </Button>
+                <AgentSwitcher />
+              </div>
             </div>
           </PopoverAnchor>
           {fileTrigger ? (
@@ -317,27 +472,22 @@ export function AiInputBar() {
           )}
         </Popover>
 
-        <AnimatePresence initial={false}>
-          {voiceLabel && (
-            <motion.div
-              key={voiceLabel}
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.12 }}
-              className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground"
-            >
+        {voiceRow.mounted && (
+          <div data-state={voiceRow.state} className="terax-reveal">
+            <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
               {c.voice.recording ? (
                 <span className="size-1.5 animate-pulse rounded-full bg-destructive" />
               ) : (
                 <Spinner className="size-3" />
               )}
-              <span className="truncate">{voiceLabel}</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
+              <span className="truncate">
+                {voiceLabel || lastVoiceLabel.current}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+    </fieldset>
   );
 }
 
@@ -360,106 +510,89 @@ function ChipsRow({
     return null;
   return (
     <div className="flex flex-wrap gap-1">
-      <AnimatePresence initial={false}>
-        {commands.map((cmd) => (
-          <motion.div
-            key={`cmd-${cmd.name}`}
-            layout
-            initial={{ opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.92 }}
-            transition={{ duration: 0.12 }}
-            className="group flex items-center gap-1 rounded-md border border-border/60 bg-card px-1.5 py-0.5 text-[11px]"
-            title={cmd.label}
+      {commands.map((cmd) => (
+        <div
+          key={`cmd-${cmd.name}`}
+          className="group flex items-center gap-1 rounded-md border border-border/60 bg-card px-1.5 py-0.5 text-[11px] animate-in fade-in-0 zoom-in-95 duration-150"
+          title={cmd.label}
+        >
+          <HugeiconsIcon
+            icon={cmd.icon}
+            size={11}
+            strokeWidth={1.75}
+            className="text-muted-foreground"
+          />
+          <span className="font-medium">#{cmd.name}</span>
+          <button
+            type="button"
+            onClick={() => onRemoveCommand(cmd.name)}
+            className="ml-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+            aria-label="Remove command"
           >
+            <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
+          </button>
+        </div>
+      ))}
+      {snippets.map((s) => (
+        <div
+          key={`snip-${s.id}`}
+          className="group flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary animate-in fade-in-0 zoom-in-95 duration-150"
+          title={s.description || s.name}
+        >
+          <HugeiconsIcon
+            icon={HashtagIcon}
+            size={11}
+            strokeWidth={2}
+            className="opacity-80"
+          />
+          <span className="font-medium">{s.handle}</span>
+          <button
+            type="button"
+            onClick={() => onRemoveSnippet(s.id)}
+            className="ml-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+            aria-label="Remove snippet"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
+          </button>
+        </div>
+      ))}
+      {files.map((f) => (
+        <div
+          key={f.id}
+          className="group flex items-center gap-1 rounded-md border border-border/60 bg-card px-1.5 py-0.5 text-[11px] animate-in fade-in-0 zoom-in-95 duration-150"
+        >
+          {f.kind === "image" && f.url ? (
+            <img src={f.url} alt="" className="size-4 rounded object-cover" />
+          ) : f.kind === "selection" ? (
             <HugeiconsIcon
-              icon={cmd.icon}
+              icon={f.source === "editor" ? CodeIcon : TerminalIcon}
               size={11}
               strokeWidth={1.75}
               className="text-muted-foreground"
             />
-            <span className="font-medium">#{cmd.name}</span>
-            <button
-              type="button"
-              onClick={() => onRemoveCommand(cmd.name)}
-              className="ml-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-              aria-label="Remove command"
-            >
-              <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
-            </button>
-          </motion.div>
-        ))}
-        {snippets.map((s) => (
-          <motion.div
-            key={`snip-${s.id}`}
-            layout
-            initial={{ opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.92 }}
-            transition={{ duration: 0.12 }}
-            className="group flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary"
-            title={s.description || s.name}
-          >
-            <HugeiconsIcon
-              icon={HashtagIcon}
-              size={11}
-              strokeWidth={2}
-              className="opacity-80"
-            />
-            <span className="font-medium">{s.handle}</span>
-            <button
-              type="button"
-              onClick={() => onRemoveSnippet(s.id)}
-              className="ml-0.5 opacity-0 transition-opacity group-hover:opacity-100"
-              aria-label="Remove snippet"
-            >
-              <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
-            </button>
-          </motion.div>
-        ))}
-        {files.map((f) => (
-          <motion.div
-            key={f.id}
-            layout
-            initial={{ opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.92 }}
-            transition={{ duration: 0.12 }}
-            className="group flex items-center gap-1 rounded-md border border-border/60 bg-card px-1.5 py-0.5 text-[11px]"
-          >
-            {f.kind === "image" && f.url ? (
-              <img src={f.url} alt="" className="size-4 rounded object-cover" />
-            ) : f.kind === "selection" ? (
-              <HugeiconsIcon
-                icon={f.source === "editor" ? CodeIcon : TerminalIcon}
-                size={11}
-                strokeWidth={1.75}
-                className="text-muted-foreground"
-              />
-            ) : (
-              <span className="font-mono text-[10px] text-muted-foreground">
-                {extOf(f.name)}
-              </span>
-            )}
-            <span className="max-w-35 truncate">
-              {f.name}
-              {f.kind === "selection" && f.text ? (
-                <span className="ml-1 text-muted-foreground">
-                  · {selLineCount(f.text)}L
-                </span>
-              ) : null}
+          ) : (
+            <span className="font-mono text-[10px] text-muted-foreground">
+              {extOf(f.name)}
             </span>
-            <button
-              type="button"
-              onClick={() => onRemoveFile(f.id)}
-              className="ml-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-              aria-label="Remove"
-            >
-              <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
-            </button>
-          </motion.div>
-        ))}
-      </AnimatePresence>
+          )}
+          <span className="max-w-35 truncate">
+            {f.name}
+            {f.kind === "selection" && f.text ? (
+              <span className="ml-1 text-muted-foreground">
+                · {selLineCount(f.text)}L
+              </span>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            onClick={() => onRemoveFile(f.id)}
+            className="ml-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+            aria-label="Remove"
+          >
+            <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={2} />
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

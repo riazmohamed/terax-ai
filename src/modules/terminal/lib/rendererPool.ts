@@ -1,4 +1,6 @@
 import { detectMonoFontFamily } from "@/lib/fonts";
+import { getFileClipboard } from "@/modules/file-transfer/fileClipboardStore";
+import { parsePathText } from "@/modules/file-transfer/pathPayload";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -8,12 +10,19 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import { terminalWordNavigationSequence } from "./keymap";
+import { shouldCursorBlink } from "./cursorBlink";
+import {
+  terminalDeleteSequence,
+  terminalLineNavigationSequence,
+  terminalWordNavigationSequence,
+} from "./keymap";
+import { formatDroppedPaths } from "./quoteShellPath";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const SNAPSHOT_SCROLLBACK_CAP = 5_000;
+const AI_VOICE_TOGGLE_REQUEST_EVENT = "terax:ai-toggle-voice-request";
 
 export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
@@ -38,6 +47,7 @@ export type Slot = {
   readonly searchAddon: SearchAddon;
   readonly serializeAddon: SerializeAddon;
   readonly host: HTMLDivElement;
+  paneBackground: string | undefined;
   webglAddon: WebglAddon | null;
   webglCanvases: HTMLCanvasElement[];
   currentLeafId: number | null;
@@ -45,6 +55,8 @@ export type Slot = {
   observer: ResizeObserver | null;
   fitTimer: ReturnType<typeof setTimeout> | null;
   ptyTimer: ReturnType<typeof setTimeout> | null;
+  webglReapTimer: ReturnType<typeof setTimeout> | null;
+  slotReapTimer: ReturnType<typeof setTimeout> | null;
   unhideRaf: number | null;
   lastCols: number;
   lastRows: number;
@@ -57,8 +69,35 @@ const slots: Slot[] = [];
 let recyclerEl: HTMLDivElement | null = null;
 let adapter: SlotAdapter | null = null;
 
+let windowActive =
+  typeof document === "undefined" || (!document.hidden && document.hasFocus());
+let windowActivityBound = false;
+let cursorBlinkEnabled = false;
+
+function bindWindowActivityListeners(): void {
+  if (windowActivityBound || typeof window === "undefined") return;
+  windowActivityBound = true;
+  const sync = () => setWindowActive(!document.hidden && document.hasFocus());
+  window.addEventListener("focus", sync);
+  window.addEventListener("blur", sync);
+  document.addEventListener("visibilitychange", sync);
+}
+
+function setWindowActive(active: boolean): void {
+  if (windowActive === active) return;
+  windowActive = active;
+  for (const slot of slots) {
+    if (slot.currentLeafId === null) continue;
+    applyCursorBlinkOnSlot(
+      slot,
+      adapter?.isLeafFocused(slot.currentLeafId) ?? false,
+    );
+  }
+}
+
 export function configureRendererPool(a: SlotAdapter): void {
   adapter = a;
+  bindWindowActivityListeners();
 }
 
 export function forEachSlot(fn: (slot: Slot) => void): void {
@@ -67,6 +106,128 @@ export function forEachSlot(fn: (slot: Slot) => void): void {
 
 export function poolSize(): number {
   return slots.length;
+}
+
+export type PoolSlotStat = {
+  id: number;
+  leafId: number | null;
+  cols: number;
+  rows: number;
+  bufferLines: number;
+  webgl: boolean;
+  canvases: number;
+};
+
+export function poolSlotStats(): PoolSlotStat[] {
+  return slots.map((s) => ({
+    id: s.id,
+    leafId: s.currentLeafId,
+    cols: s.term.cols,
+    rows: s.term.rows,
+    bufferLines: s.term.buffer.active.length,
+    webgl: !!s.webglAddon,
+    canvases: s.webglCanvases.length,
+  }));
+}
+
+// Bracketed paste via xterm, so an app that enabled it (Claude Code) treats a
+// dropped path as a real paste while a plain shell gets the literal text.
+export function pasteIntoLeaf(leafId: number, text: string): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  slot.term.paste(text);
+  return true;
+}
+
+export function copyLeafSelection(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  const selection = slot?.term.getSelection() ?? "";
+  if (!selection) return false;
+  void writeTerminalClipboardText(selection);
+  return true;
+}
+
+export function pasteClipboardIntoLeaf(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  void pasteTerminalClipboard(slot.term);
+  return true;
+}
+
+export function selectAllLeaf(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  slot.term.selectAll();
+  return true;
+}
+
+export function clearLeafScreen(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return false;
+  slot.term.clear();
+  return true;
+}
+
+export function setLeafPaneBackground(
+  leafId: number,
+  background: string | undefined,
+): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot || slot.paneBackground === background) return;
+  slot.paneBackground = background;
+  applySlotTheme(slot);
+}
+
+function pathsFromTerminalClipboardText(text: string): string[] {
+  const snapshot = getFileClipboard();
+  if (snapshot && (!text || clipboardTextMatchesPaths(text, snapshot.paths))) {
+    return snapshot.paths;
+  }
+  return parsePathText(text);
+}
+
+function clipboardTextMatchesPaths(
+  text: string,
+  paths: readonly string[],
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed === paths.join("\n")) return true;
+  const parsed = parsePathText(trimmed);
+  return (
+    parsed.length === paths.length &&
+    parsed.every((p, index) => p === paths[index])
+  );
+}
+
+async function readTerminalPasteText(): Promise<string> {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return "";
+  }
+}
+
+function getTerminalPastePayload(text: string): string {
+  const paths = pathsFromTerminalClipboardText(text);
+  if (paths.length > 0) return formatDroppedPaths(paths);
+  return text;
+}
+
+async function pasteTerminalClipboard(term: Terminal): Promise<void> {
+  const text = await readTerminalPasteText();
+  const payload = getTerminalPastePayload(text);
+  if (payload) term.paste(payload);
+}
+
+function isAiVoiceToggle(event: KeyboardEvent): boolean {
+  return (
+    event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    event.key.toLowerCase() === "s"
+  );
 }
 
 function getRecycler(): HTMLDivElement {
@@ -78,6 +239,15 @@ function getRecycler(): HTMLDivElement {
   document.body.appendChild(el);
   recyclerEl = el;
   return el;
+}
+
+const MCR_BG_ACTIVE = 4.5;
+const MCR_BG_INACTIVE = 1;
+
+function bgActive(
+  prefs: ReturnType<typeof usePreferencesStore.getState>,
+): boolean {
+  return prefs.backgroundKind === "image" && !!prefs.backgroundImageId;
 }
 
 function termOptions() {
@@ -92,7 +262,16 @@ function termOptions() {
     cursorInactiveStyle: "outline" as const,
     scrollback: prefs.terminalScrollback,
     allowProposedApi: true,
+    minimumContrastRatio: bgActive(prefs) ? MCR_BG_ACTIVE : MCR_BG_INACTIVE,
   };
+}
+
+export function applyBackgroundActive(active: boolean): void {
+  const value = active ? MCR_BG_ACTIVE : MCR_BG_INACTIVE;
+  for (const slot of slots) {
+    if (slot.term.options.minimumContrastRatio === value) continue;
+    slot.term.options.minimumContrastRatio = value;
+  }
 }
 
 function createSlot(): Slot {
@@ -120,6 +299,7 @@ function createSlot(): Slot {
     searchAddon,
     serializeAddon,
     host,
+    paneBackground: undefined,
     webglAddon: null,
     webglCanvases: [],
     currentLeafId: null,
@@ -127,6 +307,8 @@ function createSlot(): Slot {
     observer: null,
     fitTimer: null,
     ptyTimer: null,
+    webglReapTimer: null,
+    slotReapTimer: null,
     unhideRaf: null,
     lastCols: term.cols,
     lastRows: term.rows,
@@ -135,27 +317,67 @@ function createSlot(): Slot {
     lastUsedAt: 0,
   };
 
-  attachWebgl(slot);
-
   term.attachCustomKeyEventHandler((event) => {
+    // During IME composition the browser is assembling a multi-keystroke
+    // character (Chinese pinyin → hanzi, Korean jamo → syllable, etc.).
+    // Raw keydown events — including the Enter that commits a candidate —
+    // must NOT be forwarded to the PTY; xterm will receive the final
+    // composed string through its own compositionend handler instead.
+    // keyCode 229 ("Process") is what Chromium reports for every key
+    // pressed inside an active IME session when isComposing is not yet set.
+    if (event.isComposing || event.keyCode === 229) return false;
+
+    if (isAiVoiceToggle(event)) {
+      event.preventDefault();
+      if (event.type === "keydown") {
+        window.dispatchEvent(new Event(AI_VOICE_TOGGLE_REQUEST_EVENT));
+      }
+      return false;
+    }
+
     const leafId = slot.currentLeafId;
     if (leafId === null) return false;
     const bridge = adapter?.resolveLeaf(leafId);
     if (!bridge) return true;
+    const lineNavigation = terminalLineNavigationSequence(event, {
+      isMac: IS_MAC,
+    });
+    if (lineNavigation) {
+      event.preventDefault();
+      if (event.type === "keydown") bridge.writeToPty(lineNavigation);
+      return false;
+    }
     const wordNavigation = terminalWordNavigationSequence(event);
     if (wordNavigation) {
       event.preventDefault();
       if (event.type === "keydown") bridge.writeToPty(wordNavigation);
       return false;
     }
-    if (isCtrlBackspace(event)) {
+    const deleteSeq = terminalDeleteSequence(event, { isMac: IS_MAC });
+    if (deleteSeq) {
       event.preventDefault();
-      if (event.type === "keydown") bridge.writeToPty("\x17");
+      if (event.type === "keydown") bridge.writeToPty(deleteSeq);
       return false;
     }
     if (isShiftEnter(event)) {
       event.preventDefault();
       if (event.type === "keydown") bridge.writeToPty("\x1b\r");
+      return false;
+    }
+    const copyMode = terminalCopyMode(event, slot.term);
+    if (copyMode !== "none") {
+      if (copyMode === "copy-selection" && event.type === "keydown") {
+        const sel = slot.term.getSelection();
+        if (sel) void writeTerminalClipboardText(sel);
+      }
+      event.preventDefault();
+      return false;
+    }
+    if (isTerminalPaste(event)) {
+      if (event.type === "keydown") {
+        void pasteTerminalClipboard(slot.term);
+      }
+      event.preventDefault();
       return false;
     }
     return true;
@@ -216,6 +438,7 @@ export type AcquireParams = {
   drainRing: (write: (bytes: Uint8Array) => void) => void;
   shellExited: boolean;
   searchQuery: string | null;
+  paneBackground: string | undefined;
   cols: number;
   rows: number;
   registerOsc: (term: Terminal) => (() => void)[];
@@ -244,19 +467,32 @@ export function acquireSlot(params: AcquireParams): Slot {
 }
 
 function bindSlot(slot: Slot, p: AcquireParams): void {
+  const stale =
+    !slot.webglAddon || performance.now() - slot.lastUsedAt > SLOT_STALE_MS;
   slot.currentLeafId = p.leafId;
   slot.lastUsedAt = performance.now();
 
   cancelPendingUnhide(slot);
+  cancelWebglReap(slot);
+  cancelSlotReap(slot);
   slot.host.style.visibility = "hidden";
 
   if (slot.host.parentNode !== p.container) {
     p.container.appendChild(slot.host);
   }
 
+  slot.paneBackground = p.paneBackground;
+  applySlotTheme(slot);
   slot.term.options.disableStdin = p.shellExited;
   slot.term.clear();
   slot.term.reset();
+
+  for (const d of slot.oscDisposers) {
+    try {
+      d();
+    } catch {}
+  }
+  slot.oscDisposers = p.registerOsc(slot.term);
 
   if (
     p.cols > 0 &&
@@ -275,8 +511,8 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
   if (p.altScreen) {
     // Discard the dormant ring. TUI output is incremental cursor-positioned
-    // updates that can't be replayed coherently on top of a stale snapshot
-    // — see the SIGWINCH kick below, which makes the TUI redraw from scratch.
+    // updates that can't be replayed coherently on top of a stale snapshot.
+    // The SIGWINCH kick below makes the TUI redraw from scratch.
     p.drainRing(() => {});
   } else {
     p.drainRing((bytes) => slot.term.write(bytes));
@@ -284,13 +520,6 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   try {
     slot.term.write("\x1b[?25h");
   } catch {}
-
-  for (const d of slot.oscDisposers) {
-    try {
-      d();
-    } catch {}
-  }
-  slot.oscDisposers = p.registerOsc(slot.term);
 
   setupResizeObserver(slot, p);
   slot.fitAddon.fit();
@@ -315,16 +544,22 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     adapter?.resolveLeaf(p.leafId)?.kickPty(slot.term.cols, slot.term.rows);
   }
 
-  scheduleUnhide(slot);
+  scheduleUnhide(slot, stale);
 
   p.onSearchReady(slot.searchAddon);
 }
 
-function scheduleUnhide(slot: Slot): void {
+function scheduleUnhide(slot: Slot, stale: boolean): void {
   slot.unhideRaf = requestAnimationFrame(() => {
     slot.unhideRaf = requestAnimationFrame(() => {
       slot.unhideRaf = null;
       slot.host.style.visibility = "";
+      if (stale) {
+        if (!slot.webglAddon) attachWebgl(slot);
+        try {
+          slot.term.refresh(0, slot.term.rows - 1);
+        } catch {}
+      }
       const leafId = slot.currentLeafId;
       if (leafId !== null && adapter?.isLeafFocused(leafId)) {
         slot.term.focus();
@@ -342,6 +577,8 @@ function cancelPendingUnhide(slot: Slot): void {
 
 function rewireSlot(slot: Slot, p: AcquireParams): void {
   slot.lastUsedAt = performance.now();
+  slot.paneBackground = p.paneBackground;
+  applySlotTheme(slot);
   if (slot.host.parentNode !== p.container) {
     p.container.appendChild(slot.host);
   }
@@ -451,9 +688,84 @@ function detachSlotFromLeaf(slot: Slot): void {
 
   slot.currentLeafId = null;
   slot.lastUsedAt = performance.now();
+  scheduleWebglReap(slot);
+  scheduleSlotReap(slot);
+}
+
+function scheduleWebglReap(slot: Slot): void {
+  cancelWebglReap(slot);
+  if (!slot.webglAddon) return;
+  slot.webglReapTimer = setTimeout(() => {
+    slot.webglReapTimer = null;
+    if (slot.currentLeafId === null) disposeSlotWebgl(slot);
+  }, WEBGL_REAP_GRACE_MS);
+}
+
+function cancelWebglReap(slot: Slot): void {
+  if (slot.webglReapTimer !== null) {
+    clearTimeout(slot.webglReapTimer);
+    slot.webglReapTimer = null;
+  }
+}
+
+function scheduleSlotReap(slot: Slot): void {
+  cancelSlotReap(slot);
+  slot.slotReapTimer = setTimeout(() => {
+    slot.slotReapTimer = null;
+    reapIdleSlot(slot);
+  }, SLOT_REAP_GRACE_MS);
+}
+
+function cancelSlotReap(slot: Slot): void {
+  if (slot.slotReapTimer !== null) {
+    clearTimeout(slot.slotReapTimer);
+    slot.slotReapTimer = null;
+  }
+}
+
+function reapIdleSlot(slot: Slot): void {
+  if (slot.currentLeafId !== null) return;
+  const idle = slots.filter((s) => s.currentLeafId === null);
+  if (idle.length <= IDLE_SLOTS_KEEP_WARM) return;
+  idle.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+  const surplus = idle.slice(0, idle.length - IDLE_SLOTS_KEEP_WARM);
+  if (surplus.includes(slot)) disposeSlot(slot);
+}
+
+function disposeSlot(slot: Slot): void {
+  cancelSlotReap(slot);
+  cancelWebglReap(slot);
+  cancelPendingUnhide(slot);
+  if (slot.fitTimer) clearTimeout(slot.fitTimer);
+  if (slot.ptyTimer) clearTimeout(slot.ptyTimer);
+  slot.fitTimer = null;
+  slot.ptyTimer = null;
+  slot.observer?.disconnect();
+  slot.observer = null;
+  for (const d of slot.oscDisposers) {
+    try {
+      d();
+    } catch {}
+  }
+  slot.oscDisposers = [];
+  disposeSlotWebgl(slot);
+  try {
+    slot.term.dispose();
+  } catch (e) {
+    console.warn("[terax] slot dispose failed:", e);
+  }
+  slot.host.remove();
+  const i = slots.indexOf(slot);
+  if (i >= 0) slots.splice(i, 1);
 }
 
 const WEBGL_RECOVERY_DELAY_MS = 250;
+// Below this a re-shown slot is fresh enough to trust; above it, repaint on
+// unhide to defeat silent GPU/context staleness.
+const SLOT_STALE_MS = 10_000;
+const WEBGL_REAP_GRACE_MS = 30_000;
+const SLOT_REAP_GRACE_MS = 45_000;
+const IDLE_SLOTS_KEEP_WARM = 1;
 
 function attachWebgl(slot: Slot): void {
   if (slot.webglAddon || !slot.term.element) return;
@@ -477,9 +789,14 @@ function attachWebgl(slot: Slot): void {
       // reset; without re-attach the slot would silently fall back to DOM
       // forever. Defer past WebKit's reset window before retrying.
       setTimeout(() => {
-        if (slot.webglAddon) return;
+        if (slot.webglAddon || slot.currentLeafId === null) return;
         if (!usePreferencesStore.getState().terminalWebglEnabled) return;
         attachWebgl(slot);
+        if (slot.webglAddon) {
+          try {
+            slot.term.refresh(0, slot.term.rows - 1);
+          } catch {}
+        }
       }, WEBGL_RECOVERY_DELAY_MS);
     });
     slot.term.loadAddon(webgl);
@@ -547,8 +864,19 @@ function releaseCanvasContext(canvas: HTMLCanvasElement): void {
 
 export function applyWebglPreference(enabled: boolean): void {
   for (const slot of slots) {
-    if (enabled && !slot.webglAddon) attachWebgl(slot);
-    else if (!enabled && slot.webglAddon) disposeSlotWebgl(slot);
+    if (enabled) {
+      if (slot.currentLeafId !== null && !slot.webglAddon) {
+        attachWebgl(slot);
+        if (slot.webglAddon) {
+          try {
+            slot.term.refresh(0, slot.term.rows - 1);
+          } catch {}
+        }
+      }
+    } else if (slot.webglAddon) {
+      cancelWebglReap(slot);
+      disposeSlotWebgl(slot);
+    }
   }
 }
 
@@ -597,10 +925,15 @@ export function applyScrollback(value: number): void {
 }
 
 export function applyTheme(): void {
+  for (const slot of slots) applySlotTheme(slot);
+}
+
+function applySlotTheme(slot: Slot): void {
   const theme = buildTerminalTheme();
-  for (const slot of slots) {
-    slot.term.options.theme = theme;
-  }
+  slot.term.options.theme = slot.paneBackground
+    ? { ...theme, background: slot.paneBackground }
+    : theme;
+  slot.host.style.backgroundColor = slot.paneBackground ?? "";
 }
 
 export function focusSlot(leafId: number): void {
@@ -614,8 +947,19 @@ export function setSlotFocused(leafId: number, focused: boolean): void {
   applyCursorBlinkOnSlot(slot, focused);
 }
 
+export function applyCursorBlink(enabled: boolean): void {
+  cursorBlinkEnabled = enabled;
+  for (const slot of slots) {
+    if (slot.currentLeafId === null) continue;
+    applyCursorBlinkOnSlot(
+      slot,
+      adapter?.isLeafFocused(slot.currentLeafId) ?? false,
+    );
+  }
+}
+
 function applyCursorBlinkOnSlot(slot: Slot, focused: boolean): void {
-  const desired = focused;
+  const desired = shouldCursorBlink(cursorBlinkEnabled, windowActive, focused);
   if (slot.term.options.cursorBlink === desired) return;
   slot.term.options.cursorBlink = desired;
 }
@@ -624,11 +968,102 @@ export function getSlotForLeaf(leafId: number): Slot | null {
   return slots.find((s) => s.currentLeafId === leafId) ?? null;
 }
 
-function isCtrlBackspace(e: KeyboardEvent): boolean {
-  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-  const isMac = /Mac|iPhone|iPad/.test(ua);
-  const mod = isMac ? e.metaKey : e.ctrlKey;
-  return mod && (e.key === "Backspace" || e.code === "Backspace");
+export function isLeafAltScreen(leafId: number): boolean {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  return slot ? isAltScreen(slot) : false;
+}
+
+export function parkLeafSlot(leafId: number): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (slot) disposeSlotWebgl(slot);
+}
+
+export function refreshLeafSlot(leafId: number): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return;
+  if (usePreferencesStore.getState().terminalWebglEnabled && !slot.webglAddon) {
+    attachWebgl(slot);
+  }
+  try {
+    slot.term.refresh(0, slot.term.rows - 1);
+  } catch {}
+}
+
+export function disposeLeafSlot(leafId: number): void {
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (slot) disposeSlot(slot);
+}
+
+const IS_MAC =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.userAgent);
+
+type TerminalCopyMode = "none" | "copy-selection" | "copy-empty";
+
+function terminalCopyMode(e: KeyboardEvent, term: Terminal): TerminalCopyMode {
+  const isC = e.code === "KeyC" || e.key === "c" || e.key === "C";
+  if (!isC || e.altKey) return "none";
+
+  if (IS_MAC) {
+    if (!e.metaKey || e.ctrlKey) return "none";
+    return term.hasSelection() ? "copy-selection" : "copy-empty";
+  }
+
+  if (!e.ctrlKey || e.metaKey) return "none";
+  if (e.shiftKey) return term.hasSelection() ? "copy-selection" : "copy-empty";
+  return term.hasSelection() ? "copy-selection" : "none";
+}
+
+function isTerminalPaste(e: KeyboardEvent): boolean {
+  const isV = e.code === "KeyV" || e.key === "v" || e.key === "V";
+  if (IS_MAC) {
+    return isV && e.metaKey && !e.ctrlKey && !e.altKey;
+  }
+  return isV && e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
+async function writeTerminalClipboardText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    copyTextWithSelectionFallback(text);
+  }
+}
+
+function copyTextWithSelectionFallback(text: string): boolean {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+
+  const selection = document.getSelection();
+  const ranges: Range[] = [];
+  if (selection) {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      ranges.push(selection.getRangeAt(index).cloneRange());
+    }
+  }
+
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  } finally {
+    document.body.removeChild(textarea);
+    if (selection) {
+      selection.removeAllRanges();
+      for (const range of ranges) selection.addRange(range);
+    }
+  }
+
+  return copied;
 }
 
 function isShiftEnter(e: KeyboardEvent): boolean {

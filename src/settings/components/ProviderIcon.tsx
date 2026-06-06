@@ -1,5 +1,6 @@
 import type { ProviderId } from "@/modules/ai/config";
 import {
+  AppleIcon,
   ChatGptIcon,
   ClaudeIcon,
   ComputerIcon,
@@ -9,9 +10,9 @@ import {
   CpuIcon,
   DeepseekIcon,
   GlobeIcon,
-  Hexagon01Icon,
+  MistralIcon,
   PlugIcon,
-  ServerStack03Icon,
+  ServerStack01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -23,11 +24,12 @@ const ICON_BY_PROVIDER = {
   cerebras: CpuIcon,
   groq: FlashIcon,
   deepseek: DeepseekIcon,
-  mistral: Hexagon01Icon,
+  mistral: MistralIcon,
   openrouter: GlobeIcon,
   "openai-compatible": PlugIcon,
   lmstudio: ComputerIcon,
-  ollama: ServerStack03Icon,
+  mlx: AppleIcon,
+  ollama: ServerStack01Icon,
 } as const satisfies Record<ProviderId, typeof ChatGptIcon>;
 
 type Props = {

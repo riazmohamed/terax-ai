@@ -6,7 +6,7 @@ import {
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
 import { useChatStore } from "@/modules/ai/store/chatStore";
-import { providerNeedsKey, resolveModel } from "@/modules/ai/config";
+import { providerNeedsKey, resolveModelOrNull } from "@/modules/ai/config";
 import {
   invalidateDiff,
   invalidateRepoDiffs,
@@ -369,17 +369,27 @@ export function useSourceControlPanel(
   const selectedModelId = useChatStore((state) => state.selectedModelId);
   const agentStatus = useChatStore((state) => state.agentMeta.status);
   const customModels = usePreferencesStore((state) => state.customModels);
+  const customEndpoints = usePreferencesStore((state) => state.customEndpoints);
   const hasApiKeyForSelected = useChatStore((state) => {
-    const model = resolveModel(state.selectedModelId, customModels);
+    const model = resolveModelOrNull(
+      state.selectedModelId,
+      customEndpoints,
+      customModels,
+    );
     if (!model) return false;
     return !providerNeedsKey(model.provider) || !!state.apiKeys[model.provider];
   });
   const lmstudioModelId = usePreferencesStore((state) => state.lmstudioModelId);
+  const mlxModelId = usePreferencesStore((state) => state.mlxModelId);
+  const ollamaModelId = usePreferencesStore((state) => state.ollamaModelId);
   const openaiCompatibleBaseURL = usePreferencesStore(
     (state) => state.openaiCompatibleBaseURL,
   );
   const openaiCompatibleModelId = usePreferencesStore(
     (state) => state.openaiCompatibleModelId,
+  );
+  const openrouterModelId = usePreferencesStore(
+    (state) => state.openrouterModelId,
   );
   const [panelState, setPanelState] = useState<PanelState>("closed");
   const [repo, setRepo] = useState<GitRepoInfo | null>(null);
@@ -459,7 +469,11 @@ export function useSourceControlPanel(
 
   const allClean = stagedEntries.length === 0 && unstagedEntries.length === 0;
   const canPush = !!status?.upstream && status.behind === 0;
-  const selectedModel = resolveModel(selectedModelId, customModels);
+  const selectedModel = resolveModelOrNull(
+    selectedModelId,
+    customEndpoints,
+    customModels,
+  );
   const aiBusy = agentStatus !== "idle" && agentStatus !== "error";
   const anyActionBusy = localActionBusy !== null || summary.busyAction !== null;
   const aiUnavailableReason = useMemo(() => {
@@ -472,18 +486,30 @@ export function useSourceControlPanel(
     if (selectedModel?.id === "lmstudio-local" && !lmstudioModelId.trim()) {
       return "Connect an AI provider to generate commit messages";
     }
+    if (selectedModel?.id === "mlx-local" && !mlxModelId.trim()) {
+      return "Connect an AI provider to generate commit messages";
+    }
+    if (selectedModel?.id === "ollama-local" && !ollamaModelId.trim()) {
+      return "Connect an AI provider to generate commit messages";
+    }
     if (
       selectedModel?.id === "openai-compatible-custom" &&
       (!openaiCompatibleBaseURL.trim() || !openaiCompatibleModelId.trim())
     ) {
       return "Connect an AI provider to generate commit messages";
     }
+    if (selectedModel?.id === "openrouter-custom" && !openrouterModelId.trim()) {
+      return "Connect an AI provider to generate commit messages";
+    }
     return null;
   }, [
     hasApiKeyForSelected,
     lmstudioModelId,
+    mlxModelId,
+    ollamaModelId,
     openaiCompatibleBaseURL,
     openaiCompatibleModelId,
+    openrouterModelId,
     selectedModel,
     stagedEntries.length,
   ]);
@@ -861,11 +887,16 @@ export function useSourceControlPanel(
         {
           lmstudioBaseURL: prefs.lmstudioBaseURL,
           lmstudioModelId,
+          mlxBaseURL: prefs.mlxBaseURL,
+          mlxModelId,
           ollamaBaseURL: prefs.ollamaBaseURL,
-          ollamaModelId: prefs.ollamaModelId,
+          ollamaModelId,
           openaiCompatibleBaseURL,
           openaiCompatibleModelId,
+          openrouterModelId,
           customModels: prefs.customModels,
+          customEndpoints: prefs.customEndpoints,
+          customEndpointKeys: chatState.customEndpointKeys,
         },
       );
       const result = await generateText({
@@ -902,8 +933,11 @@ export function useSourceControlPanel(
     aiUnavailableReason,
     aiBusy,
     lmstudioModelId,
+    mlxModelId,
+    ollamaModelId,
     openaiCompatibleBaseURL,
     openaiCompatibleModelId,
+    openrouterModelId,
     repo,
     selectedModelId,
     stagedEntries,

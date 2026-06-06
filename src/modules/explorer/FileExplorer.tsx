@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -14,6 +15,7 @@ import {
   Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { invoke } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   forwardRef,
@@ -24,22 +26,47 @@ import {
   useRef,
   useState,
 } from "react";
+import type {
+  ClipboardEvent as ReactClipboardEvent,
+  DragEvent as ReactDragEvent,
+} from "react";
+import { DeleteConfirmDialog, type DeleteTarget } from "./DeleteConfirmDialog";
 import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
 import { EntryRow, PendingRow, StatusRow } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
-import { copyToClipboard, revealInFinder } from "./lib/contextActions";
+import {
+  NATIVE_PATH_DROP_EVENT,
+  NATIVE_PATH_DROP_TARGET_EVENT,
+  type NativePathDropEventDetail,
+  type NativePathDropTarget,
+} from "@/modules/file-transfer/useNativePathDropRouter";
+import { getFileClipboard } from "@/modules/file-transfer/fileClipboardStore";
+import {
+  filesFromDataTransfer,
+  generatedPastedImageName,
+  isImageBlob,
+  parsePathText,
+  usableFileName,
+} from "@/modules/file-transfer/pathPayload";
+import {
+  copyFilePaths,
+  copyToClipboard,
+  revealInFinder,
+} from "./lib/contextActions";
 import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
-import { useFileTree } from "./lib/useFileTree";
+import { dirname, useFileTree } from "./lib/useFileTree";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 
 export type FileExplorerHandle = {
   focus: () => void;
   isFocused: () => boolean;
+  focusSearch: () => void;
 };
 
 type Props = {
   rootPath: string | null;
+  activeFilePath?: string | null;
   onOpenFile: (path: string, pin?: boolean) => void;
   onPathRenamed?: (from: string, to: string) => void;
   onPathDeleted?: (path: string) => void;
@@ -58,9 +85,22 @@ type Row =
       isExpanded: boolean;
       depth: number;
     }
-  | { kind: "rename"; key: string; path: string; name: string; isDir: boolean; depth: number }
+  | {
+      kind: "rename";
+      key: string;
+      path: string;
+      name: string;
+      isDir: boolean;
+      depth: number;
+    }
   | { kind: "pending"; key: string; depth: number; pendingKind: "file" | "dir" }
-  | { kind: "status"; key: string; depth: number; tone: "muted" | "error"; message: string };
+  | {
+      kind: "status";
+      key: string;
+      depth: number;
+      tone: "muted" | "error";
+      message: string;
+    };
 
 const ROW_HEIGHT = 24;
 const OVERSCAN = 8;
@@ -68,6 +108,43 @@ const OVERSCAN = 8;
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : path;
+}
+
+function pastedFileName(file: File, now: Date): string {
+  const usable = usableFileName(file.name);
+  if (usable) return usable;
+  if (isImageBlob(file, file.name)) {
+    return generatedPastedImageName(now, file.type || "image/png");
+  }
+  return `pasted-file-${compactTimestamp(now)}.bin`;
+}
+
+function compactTimestamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+async function blobBytes(blob: Blob): Promise<number[]> {
+  return Array.from(new Uint8Array(await blob.arrayBuffer()));
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((path, index) => path === right[index]);
+}
+
+function clipboardTextMatchesPaths(
+  text: string,
+  paths: readonly string[],
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed === paths.join("\n")) return true;
+  return samePaths(parsePathText(trimmed), paths);
+}
+
+async function readNativeClipboardFilePaths(): Promise<string[]> {
+  return await invoke<string[]>("clipboard_read_file_paths");
 }
 
 function buildRows(
@@ -79,7 +156,7 @@ function buildRows(
 
   const walk = (parent: string, depth: number) => {
     const node = tree.nodes[parent];
-    if (!node || node.status !== "loaded") return;
+    if (node?.status !== "loaded") return;
     for (const entry of node.entries) {
       const path = tree.joinPath(parent, entry.name);
       const isDir = entry.kind === "dir";
@@ -147,6 +224,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
   function FileExplorer(
     {
       rootPath,
+      activeFilePath,
       onOpenFile,
       onPathRenamed,
       onPathDeleted,
@@ -163,11 +241,28 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
     const searchRef = useRef<ExplorerSearchHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+    const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);
+    const [operationError, setOperationError] = useState<string | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+    const errorTimerRef = useRef<number | null>(null);
+    const pasteEventCounterRef = useRef(0);
 
     const { rows, entryIndexByPath } = useMemo(() => {
-      if (!rootPath) return { rows: [] as Row[], entryIndexByPath: new Map<string, number>() };
+      if (!rootPath)
+        return {
+          rows: [] as Row[],
+          entryIndexByPath: new Map<string, number>(),
+        };
       return buildRows(rootPath, tree);
-    }, [rootPath, tree.nodes, tree.expanded, tree.renaming, tree.pendingCreate, tree]);
+    }, [
+      rootPath,
+      tree.nodes,
+      tree.expanded,
+      tree.renaming,
+      tree.pendingCreate,
+      tree,
+    ]);
 
     const entryPaths = useMemo<string[]>(() => {
       const out: string[] = [];
@@ -198,6 +293,20 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
       [entryIndexByPath, virtualizer],
     );
 
+    const lastSyncedActivePathRef = useRef<string | null>(null);
+    useEffect(() => {
+      if (
+        !activeFilePath ||
+        activeFilePath === lastSyncedActivePathRef.current
+      ) {
+        return;
+      }
+      if (!entryIndexByPath.has(activeFilePath)) return;
+      lastSyncedActivePathRef.current = activeFilePath;
+      setSelectedPath(activeFilePath);
+      requestAnimationFrame(() => scrollEntryIntoView(activeFilePath));
+    }, [activeFilePath, entryIndexByPath, scrollEntryIntoView]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -215,6 +324,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
           const active = document.activeElement;
           return active instanceof Node && c.contains(active);
         },
+        focusSearch: () => {
+          setIsSearchOpen(true);
+          searchRef.current?.focus();
+        },
       }),
       [entryPaths, scrollEntryIntoView, selectedPath],
     );
@@ -229,6 +342,290 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
         searchRef.current?.focus();
       },
     });
+
+    useEffect(() => {
+      return () => {
+        if (errorTimerRef.current !== null) {
+          window.clearTimeout(errorTimerRef.current);
+        }
+      };
+    }, []);
+
+    const showOperationError = useCallback((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setOperationError(message);
+      if (errorTimerRef.current !== null) {
+        window.clearTimeout(errorTimerRef.current);
+      }
+      errorTimerRef.current = window.setTimeout(() => {
+        setOperationError(null);
+        errorTimerRef.current = null;
+      }, 5000);
+    }, []);
+
+    const deleteTargetForPath = useCallback(
+      (path: string): DeleteTarget | null => {
+        const index = entryIndexByPath.get(path);
+        const row = index === undefined ? null : rows[index];
+        if (!row || (row.kind !== "entry" && row.kind !== "rename"))
+          return null;
+        return {
+          path: row.path,
+          name: row.name,
+          isDir: row.isDir,
+        };
+      },
+      [entryIndexByPath, rows],
+    );
+
+    const requestDeletePath = useCallback(
+      (path: string) => {
+        const target = deleteTargetForPath(path);
+        if (target) setDeleteTarget(target);
+      },
+      [deleteTargetForPath],
+    );
+
+    const confirmDeleteTarget = useCallback(
+      async (target: DeleteTarget) => {
+        setDeleteTarget(null);
+        await tree.deletePath(target.path);
+        requestAnimationFrame(() => containerRef.current?.focus());
+      },
+      [tree],
+    );
+
+    const destinationForPath = useCallback(
+      (path: string | null): string | null => {
+        if (!rootPath) return null;
+        if (!path) return rootPath;
+        const index = entryIndexByPath.get(path);
+        const row = index === undefined ? null : rows[index];
+        if (
+          row &&
+          (row.kind === "entry" || row.kind === "rename") &&
+          row.isDir
+        ) {
+          return path;
+        }
+        return dirname(path);
+      },
+      [entryIndexByPath, rootPath, rows],
+    );
+
+    const destinationForNativeTarget = useCallback(
+      (target: NativePathDropTarget | null): string | null => {
+        if (!rootPath || target?.kind !== "explorer") return null;
+        if (target.rootPath !== rootPath) return null;
+        if (target.fsKind === "root" || !target.path) return rootPath;
+        if (target.fsKind === "dir") return target.path;
+        return dirname(target.path);
+      },
+      [rootPath],
+    );
+
+    const isDirectoryPath = useCallback(
+      (path: string): boolean => {
+        const index = entryIndexByPath.get(path);
+        const row = index === undefined ? null : rows[index];
+        if (!row) return false;
+        return (row.kind === "entry" || row.kind === "rename") && row.isDir;
+      },
+      [entryIndexByPath, rows],
+    );
+
+    const resolvePasteDestination = useCallback((): string | null => {
+      if (hoveredPath && isDirectoryPath(hoveredPath)) return hoveredPath;
+      return destinationForPath(selectedPath);
+    }, [destinationForPath, hoveredPath, isDirectoryPath, selectedPath]);
+
+    const pasteFilesInto = useCallback(
+      async (destinationDir: string, files: readonly File[]) => {
+        for (const file of files) {
+          const bytes = await blobBytes(file);
+          await tree.writePastedBinary(
+            destinationDir,
+            pastedFileName(file, new Date()),
+            bytes,
+          );
+        }
+      },
+      [tree],
+    );
+
+    const pastePathsInto = useCallback(
+      async (destinationDir: string, paths: readonly string[]) => {
+        if (paths.length === 0) return;
+        await tree.copyInto(destinationDir, paths);
+      },
+      [tree],
+    );
+
+    const pasteIntoDestination = useCallback(
+      async (destinationDir: string, transfer?: DataTransfer | null) => {
+        try {
+          const files = filesFromDataTransfer(transfer ?? null);
+          if (files.length > 0) {
+            await pasteFilesInto(destinationDir, files);
+            setOperationError(null);
+            return;
+          }
+
+          const transferText = transfer
+            ? transfer.getData("text/uri-list") ||
+              transfer.getData("text/plain")
+            : "";
+          let text = transferText;
+          if (!text && !transfer) {
+            try {
+              text = await navigator.clipboard.readText();
+            } catch {
+              text = "";
+            }
+          }
+
+          const paths = parsePathText(text);
+          if (paths.length > 0) {
+            await pastePathsInto(destinationDir, paths);
+            setOperationError(null);
+            return;
+          }
+
+          const nativePaths = await readNativeClipboardFilePaths();
+          if (nativePaths.length > 0) {
+            await pastePathsInto(destinationDir, nativePaths);
+            setOperationError(null);
+            return;
+          }
+
+          const snapshot = getFileClipboard();
+          if (
+            snapshot &&
+            (!text || clipboardTextMatchesPaths(text, snapshot.paths))
+          ) {
+            await pastePathsInto(destinationDir, snapshot.paths);
+            setOperationError(null);
+          }
+        } catch (error) {
+          console.error("explorer paste failed:", error);
+          showOperationError(error);
+        }
+      },
+      [pasteFilesInto, pastePathsInto, showOperationError],
+    );
+
+    const handlePaste = useCallback(
+      (event: ReactClipboardEvent<HTMLDivElement>) => {
+        pasteEventCounterRef.current += 1;
+        if (tree.renaming || tree.pendingCreate || isSearchOpen) return;
+        const destination = resolvePasteDestination();
+        if (!destination) return;
+        event.preventDefault();
+        void pasteIntoDestination(destination, event.clipboardData);
+      },
+      [
+        isSearchOpen,
+        pasteIntoDestination,
+        resolvePasteDestination,
+        tree.pendingCreate,
+        tree.renaming,
+      ],
+    );
+
+    const destinationFromEventTarget = useCallback(
+      (target: EventTarget | null): string | null => {
+        if (!rootPath) return null;
+        const element = target instanceof Element ? target : null;
+        const row = element?.closest<HTMLElement>("[data-fs-path]") ?? null;
+        if (row && containerRef.current?.contains(row)) {
+          const path = row.dataset.fsPath ?? null;
+          if (!path) return rootPath;
+          return row.dataset.fsKind === "dir" ? path : dirname(path);
+        }
+        return rootPath;
+      },
+      [rootPath],
+    );
+
+    const handleDragOver = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (tree.renaming || tree.pendingCreate) return;
+        const destination = destinationFromEventTarget(event.target);
+        if (!destination) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDropTargetDir(destination);
+      },
+      [destinationFromEventTarget, tree.pendingCreate, tree.renaming],
+    );
+
+    const handleDragLeave = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && containerRef.current?.contains(next))
+          return;
+        setDropTargetDir(null);
+      },
+      [],
+    );
+
+    const handleDrop = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (tree.renaming || tree.pendingCreate) return;
+        const destination = destinationFromEventTarget(event.target);
+        if (!destination) return;
+        event.preventDefault();
+        setDropTargetDir(null);
+        void pasteIntoDestination(destination, event.dataTransfer);
+      },
+      [
+        destinationFromEventTarget,
+        pasteIntoDestination,
+        tree.pendingCreate,
+        tree.renaming,
+      ],
+    );
+
+    useEffect(() => {
+      if (!rootPath) return;
+      const onTarget = (event: Event) => {
+        const detail = (event as CustomEvent<NativePathDropEventDetail>).detail;
+        if (tree.renaming || tree.pendingCreate) {
+          setDropTargetDir(null);
+          return;
+        }
+        setDropTargetDir(destinationForNativeTarget(detail.target));
+      };
+      const onDrop = (event: Event) => {
+        const detail = (event as CustomEvent<NativePathDropEventDetail>).detail;
+        if (tree.renaming || tree.pendingCreate) {
+          setDropTargetDir(null);
+          return;
+        }
+        const destination = destinationForNativeTarget(detail.target);
+        setDropTargetDir(null);
+        if (!destination || detail.paths.length === 0) return;
+        void pastePathsInto(destination, detail.paths).catch(
+          (error: unknown) => {
+            console.error("explorer native drop failed:", error);
+            showOperationError(error);
+          },
+        );
+      };
+      window.addEventListener(NATIVE_PATH_DROP_TARGET_EVENT, onTarget);
+      window.addEventListener(NATIVE_PATH_DROP_EVENT, onDrop);
+      return () => {
+        window.removeEventListener(NATIVE_PATH_DROP_TARGET_EVENT, onTarget);
+        window.removeEventListener(NATIVE_PATH_DROP_EVENT, onDrop);
+      };
+    }, [
+      destinationForNativeTarget,
+      pastePathsInto,
+      rootPath,
+      showOperationError,
+      tree.pendingCreate,
+      tree.renaming,
+    ]);
 
     if (!rootPath) {
       return (
@@ -259,6 +656,31 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
         target.isContentEditable
       )
         return;
+
+      const isModifier = e.metaKey || e.ctrlKey;
+      if (isModifier && e.key.toLowerCase() === "c") {
+        const path = selectedPath ?? rootPath;
+        e.preventDefault();
+        void copyFilePaths([path]);
+        return;
+      }
+      if (isModifier && e.key.toLowerCase() === "v") {
+        const destination = resolvePasteDestination();
+        if (!destination) return;
+        const pasteEventCount = pasteEventCounterRef.current;
+        window.setTimeout(() => {
+          if (pasteEventCounterRef.current !== pasteEventCount) return;
+          void pasteIntoDestination(destination);
+        }, 50);
+        return;
+      }
+      if (!isModifier && e.key === "Delete") {
+        if (!selectedPath) return;
+        e.preventDefault();
+        requestDeletePath(selectedPath);
+        return;
+      }
+
       if (entryPaths.length === 0) return;
 
       const currentIdx = selectedPath ? entryPaths.indexOf(selectedPath) : -1;
@@ -340,6 +762,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               isRenaming={row.kind === "rename"}
               onOpenFile={onOpenFile}
               onSelectPath={setSelectedPath}
+              onRequestExplorerFocus={() => containerRef.current?.focus()}
+              onHoverPath={setHoveredPath}
+              onPasteInto={(destinationDir) =>
+                void pasteIntoDestination(destinationDir)
+              }
+              onRequestDelete={requestDeletePath}
+              isDropTarget={row.isDir && dropTargetDir === row.path}
               onRevealInTerminal={onRevealInTerminal}
               onAttachToAgent={onAttachToAgent}
               onOpenMarkdownPreview={onOpenMarkdownPreview}
@@ -357,7 +786,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
           );
         case "status":
           return (
-            <StatusRow depth={row.depth} message={row.message} tone={row.tone} />
+            <StatusRow
+              depth={row.depth}
+              message={row.message}
+              tone={row.tone}
+            />
           );
       }
     };
@@ -365,9 +798,16 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
     return (
       <div
         ref={containerRef}
+        data-explorer-root={rootPath}
         className="flex h-full flex-col outline-none"
+        role="tree"
+        aria-label="File explorer"
         tabIndex={0}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
         <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/60 px-2">
           <span
@@ -440,8 +880,18 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
             <ContextMenuTrigger asChild>
               <div
                 ref={scrollRef}
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]"
+                data-explorer-scroll="true"
+                data-fs-kind="root"
+                className={cn(
+                  "min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]",
+                  dropTargetDir === rootPath && "bg-primary/5",
+                )}
               >
+                {operationError ? (
+                  <div className="mx-2 mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                    {operationError}
+                  </div>
+                ) : null}
                 {pendingAtRoot ? (
                   <div
                     className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-[13px]"
@@ -545,6 +995,18 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
               <ContextMenuSeparator />
               <ContextMenuItem
                 className={COMPACT_ITEM}
+                onSelect={() => void copyFilePaths([rootPath])}
+              >
+                Copy
+              </ContextMenuItem>
+              <ContextMenuItem
+                className={COMPACT_ITEM}
+                onSelect={() => void pasteIntoDestination(rootPath)}
+              >
+                Paste
+              </ContextMenuItem>
+              <ContextMenuItem
+                className={COMPACT_ITEM}
                 onSelect={() => void copyToClipboard(rootPath)}
               >
                 Copy Path
@@ -558,6 +1020,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(
             </ContextMenuContent>
           </ContextMenu>
         ) : null}
+        <DeleteConfirmDialog
+          target={deleteTarget}
+          onOpenChange={(open) => {
+            if (!open) setDeleteTarget(null);
+          }}
+          onConfirm={confirmDeleteTarget}
+        />
       </div>
     );
   },
