@@ -211,6 +211,7 @@ export type ConfiguredModelDeps = {
   openaiCompatibleModelId?: string;
   /** User-registered custom models, looked up when modelId is `custom:*`. */
   customModels?: readonly CustomModel[];
+  openaiCompatibleContextLimit?: number;
 };
 
 export function buildConfiguredLanguageModel(
@@ -346,6 +347,7 @@ const EMPTY_USAGE: AgentUsage = {
 function resolveModelMeta(
   modelId: ModelId | string,
   customModels: readonly CustomModel[] | undefined,
+  openaiCompatibleContextLimit?: number,
 ): { provider: ProviderId; contextLimit: number; baseId: string } {
   if (isCustomModelId(modelId)) {
     const c = customModels?.find((x) => x.id === modelId);
@@ -361,7 +363,10 @@ function resolveModelMeta(
   const m = getModel(modelId as ModelId);
   return {
     provider: m.provider,
-    contextLimit: getModelContextLimit(m.id),
+    contextLimit:
+      m.id === "openai-compatible-custom" && openaiCompatibleContextLimit
+        ? openaiCompatibleContextLimit
+        : getModelContextLimit(m.id),
     baseId: m.id,
   };
 }
@@ -402,7 +407,7 @@ export async function runAgentStream(opts: RunAgentOptions) {
     customModels: opts.customModels,
     openaiCompatibleContextLimit: opts.openaiCompatibleContextLimit,
   });
-  const meta = resolveModelMeta(modelId, opts.customModels);
+  const meta = resolveModelMeta(modelId, opts.customModels, opts.openaiCompatibleContextLimit);
   const provider = meta.provider;
 
   const stableSystem = buildStableSystem(
